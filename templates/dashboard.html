@@ -7,20 +7,20 @@
 <body style="background:#0f172a; color:white; padding:40px;">
     <div style="max-width:800px; margin:0 auto;">
         <h1>📊 Financial Analyzer</h1>
-        <a href="/add-company" style="background:#3b82f6; color:white; padding:10px 24px; border-radius:8px; text-decoration:none;">+ Add Company</a>
+        <a href="/add-company" style="background:#3b82f6; color:white; padding:10px 24px; border-radius:8px; text-decoration:none; display:inline-block; margin-bottom:20px;">+ Add Company</a>
 
         {% if companies %}
             {% for company in companies %}
-            <div style="background:#1e293b; padding:16px; border-radius:10px; margin-top:14px;">
+            <div style="background:#1e293b; padding:16px; border-radius:10px; margin-bottom:12px;">
                 <strong>{{ company.name }}</strong> ({{ company.ticker }}) | {{ company.sector }}
                 <div style="margin-top:8px;">
-                    <a href="/input-data/{{ company._id }}" style="color:#10b981;">📝 Input Data</a> | 
-                    <a href="/analysis/{{ company._id }}" style="color:#06b6d4;">📊 View</a>
+                    <a href="/input-data/{{ company._id }}" style="color:#10b981; margin-right:12px;">📝 Input Data</a>
+                    <a href="/analysis/{{ company._id }}" style="color:#06b6d4;">📊 View Analysis</a>
                 </div>
             </div>
             {% endfor %}
         {% else %}
-            <p style="margin-top:30px;">No companies added yet. Click "Add Company" to get started.</p>
+            <p style="margin-top:30px; color:#94a3b8;">No companies added yet. Click "Add Company" to get started.</p>
         {% endif %}
     </div>
 </body>
