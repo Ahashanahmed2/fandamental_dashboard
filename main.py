@@ -35,16 +35,84 @@ async def home(request: Request):
     companies = await db.companies.find({"is_active": True}).to_list(100)
     for c in companies:
         c["_id"] = str(c["_id"])
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
-        "companies": companies,
-    })
+    
+    # Build HTML directly (no Jinja2)
+    html = """<!DOCTYPE html>
+<html>
+<head>
+    <title>Financial Analyzer</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body style="background:#0f172a;color:white;padding:40px;font-family:Arial;">
+    <div style="max-width:800px;margin:0 auto;">
+        <h1>📊 Financial Analyzer</h1>
+        <a href="/add-company" style="background:#3b82f6;color:white;padding:10px 24px;border-radius:8px;text-decoration:none;display:inline-block;margin-bottom:20px;">+ Add Company</a>
+"""
+    
+    if companies:
+        for c in companies:
+            html += f"""
+        <div style="background:#1e293b;padding:16px;border-radius:10px;margin-bottom:12px;">
+            <strong>{c['name']}</strong> ({c['ticker']}) | {c.get('sector','')}
+            <div style="margin-top:8px;">
+                <a href="/input-data/{c['_id']}" style="color:#10b981;margin-right:12px;">📝 Input Data</a>
+                <a href="/analysis/{c['_id']}" style="color:#06b6d4;">📊 View Analysis</a>
+            </div>
+        </div>"""
+    else:
+        html += '<p style="margin-top:30px;color:#94a3b8;">No companies added yet. Click "Add Company" to get started.</p>'
+    
+    html += """
+    </div>
+</body>
+</html>"""
+    
+    return HTMLResponse(content=html)
 
 @app.get("/add-company", response_class=HTMLResponse)
 async def add_company_page(request: Request):
     """Form to add new company"""
-    return templates.TemplateResponse("add_company.html", {"request": request})
-
+    html = """<!DOCTYPE html>
+<html>
+<head>
+    <title>Add Company</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body style="background:#0f172a;color:white;padding:40px;font-family:Arial;">
+    <div style="max-width:500px;margin:60px auto;background:#1e293b;padding:30px;border-radius:15px;">
+        <h3>➕ Add New Company</h3>
+        <form id="f">
+            <input id="n" class="form-control mb-2" placeholder="Company Name" required style="background:#334155;color:white;border:1px solid #475569;">
+            <input id="t" class="form-control mb-2" placeholder="Ticker" required style="background:#334155;color:white;border:1px solid #475569;">
+            <select id="s" class="form-control mb-3" style="background:#334155;color:white;border:1px solid #475569;">
+                <option value="Bank">🏦 Bank</option>
+                <option value="Pharmaceuticals">💊 Pharma</option>
+                <option value="Telecom">📱 Telecom</option>
+                <option value="General">📦 General</option>
+            </select>
+            <button type="submit" class="btn btn-primary w-100">💾 Save Company</button>
+        </form>
+        <a href="/" style="color:#94a3b8;display:block;margin-top:12px;text-align:center;">⬅ Back</a>
+    </div>
+    <script>
+        document.getElementById('f').addEventListener('submit',async e=>{
+            e.preventDefault();
+            let r=await fetch('/api/companies',{
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({
+                    name:document.getElementById('n').value,
+                    ticker:document.getElementById('t').value,
+                    sector:document.getElementById('s').value
+                })
+            });
+            if(r.ok)window.location.href='/';
+            else alert('Error');
+        });
+    </script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
 @app.get("/input-data/{company_id}", response_class=HTMLResponse)
 async def input_data_page(request: Request, company_id: str):
     """Form to input financial data"""
