@@ -189,3 +189,10 @@ async def compare_companies(sector: str):
             })
     
     return sorted(comparison, key=lambda x: x["overall_score"], reverse=True)
+
+# main.py ফাইলের শেষে যোগ করুন
+if __name__ == "__main__":
+    import uvicorn
+    import os
+    port = int(os.getenv("PORT", 10000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
