@@ -1,4 +1,3 @@
-# main.py
 from fastapi import FastAPI, HTTPException, Request, Form
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -7,6 +6,7 @@ from bson import ObjectId
 from datetime import datetime
 from typing import Optional
 import json
+import os
 
 from database import db, init_db
 from schemas import CompanyCreate, FinancialDataCreate
@@ -47,7 +47,11 @@ async def add_company_page(request: Request):
 @app.get("/input-data/{company_id}", response_class=HTMLResponse)
 async def input_data_page(request: Request, company_id: str):
     """Form to input financial data"""
-    company = await db.companies.find_one({"_id": ObjectId(company_id)})
+    try:
+        company = await db.companies.find_one({"_id": ObjectId(company_id)})
+    except:
+        raise HTTPException(400, "Invalid company ID")
+    
     if not company:
         raise HTTPException(404, "Company not found")
     company["_id"] = str(company["_id"])
@@ -59,7 +63,11 @@ async def input_data_page(request: Request, company_id: str):
 @app.get("/analysis/{company_id}", response_class=HTMLResponse)
 async def view_analysis(request: Request, company_id: str):
     """View analysis results"""
-    company = await db.companies.find_one({"_id": ObjectId(company_id)})
+    try:
+        company = await db.companies.find_one({"_id": ObjectId(company_id)})
+    except:
+        raise HTTPException(400, "Invalid company ID")
+    
     if not company:
         raise HTTPException(404, "Company not found")
     
@@ -86,6 +94,18 @@ async def view_analysis(request: Request, company_id: str):
         "request": request,
         "company": company,
         "analyses": analyses,
+    })
+
+@app.get("/result/{financial_id}", response_class=HTMLResponse)
+async def view_result(request: Request, financial_id: str):
+    """View single analysis result"""
+    analysis = await db.analysis_results.find_one({"financial_data_id": financial_id})
+    if not analysis:
+        raise HTTPException(404, "Analysis not found")
+    analysis["_id"] = str(analysis["_id"])
+    return templates.TemplateResponse("result.html", {
+        "request": request,
+        "analysis": analysis,
     })
 
 # ---------------------- API Endpoints ----------------------
@@ -119,12 +139,18 @@ async def list_companies():
 async def create_financial_data(data: FinancialDataCreate):
     """Input financial data and run analysis"""
     # Verify company exists
-    company = await db.companies.find_one({"_id": ObjectId(data.company_id)})
+    try:
+        company_oid = ObjectId(data.company_id)
+    except:
+        raise HTTPException(400, "Invalid company ID format")
+    
+    company = await db.companies.find_one({"_id": company_oid})
     if not company:
         raise HTTPException(404, "Company not found")
     
+    # Convert to dict and fix ObjectId
     doc = data.model_dump()
-    doc["company_id"] = ObjectId(data.company_id)
+    doc["company_id"] = company_oid
     doc["created_at"] = datetime.utcnow()
     
     # Save financial data
@@ -137,8 +163,8 @@ async def create_financial_data(data: FinancialDataCreate):
     
     # Save analysis result
     analysis_doc = {
-        "company_id": ObjectId(data.company_id),
-        "financial_data_id": str(result.inserted_id),
+        "company_id": company_oid,
+        "financial_data_id": financial_id,
         "company_name": company["name"],
         "ticker": company["ticker"],
         "sector": company["sector"],
@@ -190,9 +216,8 @@ async def compare_companies(sector: str):
     
     return sorted(comparison, key=lambda x: x["overall_score"], reverse=True)
 
-# main.py ফাইলের শেষে যোগ করুন
+# ---------------------- Run Config ----------------------
 if __name__ == "__main__":
     import uvicorn
-    import os
     port = int(os.getenv("PORT", 10000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
