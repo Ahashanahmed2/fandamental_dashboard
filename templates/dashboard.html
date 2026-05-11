@@ -1,17 +1,17 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Dashboard</title>
+    <title>Financial Analyzer</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
-<body style="background:#0f172a;color:white;padding:40px;">
-    <div style="max-width:800px;margin:0 auto;">
+<body style="background:#0f172a; color:white; padding:40px;">
+    <div style="max-width:800px; margin:0 auto;">
         <h1>📊 Financial Analyzer</h1>
-        <a href="/add-company" style="background:#3b82f6;color:white;padding:10px 24px;border-radius:8px;text-decoration:none;">+ Add Company</a>
-        
+        <a href="/add-company" style="background:#3b82f6; color:white; padding:10px 24px; border-radius:8px; text-decoration:none;">+ Add Company</a>
+
         {% if companies %}
             {% for company in companies %}
-            <div style="background:#1e293b;padding:16px;border-radius:10px;margin-top:14px;">
+            <div style="background:#1e293b; padding:16px; border-radius:10px; margin-top:14px;">
                 <strong>{{ company.name }}</strong> ({{ company.ticker }}) | {{ company.sector }}
                 <div style="margin-top:8px;">
                     <a href="/input-data/{{ company._id }}" style="color:#10b981;">📝 Input Data</a> | 
@@ -20,7 +20,7 @@
             </div>
             {% endfor %}
         {% else %}
-            <p style="margin-top:30px;">No companies yet.</p>
+            <p style="margin-top:30px;">No companies added yet. Click "Add Company" to get started.</p>
         {% endif %}
     </div>
 </body>
