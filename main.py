@@ -28,6 +28,16 @@ async def startup():
     await init_db()
     print("✅ Database connected & indexes created!")
 
+# ---------------------- Health Check ----------------------
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "message": "Financial Analyzer is running"}
+
+@app.head("/health")
+async def health_check_head():
+    """HEAD request for UptimeRobot"""
+    return HTMLResponse(content="", status_code=200)
+
 # ---------------------- Pages ----------------------
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
