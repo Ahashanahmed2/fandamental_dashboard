@@ -2,10 +2,92 @@
 <html>
 <head>
     <title>Add Company</title>
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="theme-color" content="#3b82f6">
+    <style>
+        .install-btn {
+            display: none;
+            background: #10b981;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            margin-bottom: 20px;
+            width: 100%;
+        }
+        .install-btn:hover { background: #059669; }
+    </style>
 </head>
-<body style="background:#0f172a;color:white;padding:40px;">
-    <h1>➕ Add Company</h1>
-    <form id="f"><input id="n" placeholder="Name" required><input id="t" placeholder="Ticker" required><select id="s"><option value="Bank">Bank</option><option value="General">General</option></select><button type="submit">Save</button></form>
-    <script>document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();let r=await fetch('/api/companies',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:document.getElementById('n').value,ticker:document.getElementById('t').value,sector:document.getElementById('s').value})});if(r.ok)window.location.href='/';})</script>
+<body style="background:#0f172a;color:white;padding:40px;font-family:Arial;">
+    <div style="max-width:500px;margin:60px auto;background:#1e293b;padding:30px;border-radius:15px;">
+        <h3>➕ Add New Company</h3>
+        
+        <!-- PWA Install Button -->
+        <button id="installBtn" class="install-btn">📲 Install App</button>
+        
+        <form id="f">
+            <input id="n" class="form-control mb-2" placeholder="Company Name" required style="width:100%;padding:10px;background:#334155;color:white;border:1px solid #475569;border-radius:5px;">
+            <input id="t" class="form-control mb-2" placeholder="Ticker (e.g., CITYBANK)" required style="width:100%;padding:10px;background:#334155;color:white;border:1px solid #475569;border-radius:5px;">
+            <select id="s" class="form-control mb-3" style="width:100%;padding:10px;background:#334155;color:white;border:1px solid #475569;border-radius:5px;">
+                <option value="Bank">🏦 Bank</option>
+                <option value="Pharmaceuticals">💊 Pharmaceuticals</option>
+                <option value="Textile">👕 Textile</option>
+                <option value="Telecom">📱 Telecom</option>
+                <option value="Food">🍔 Food & Beverage</option>
+                <option value="Energy">⚡ Energy</option>
+                <option value="Cement">🏗️ Cement</option>
+                <option value="General">📦 General</option>
+            </select>
+            <input id="sub" class="form-control mb-3" placeholder="Sub Sector (Optional)" style="width:100%;padding:10px;background:#334155;color:white;border:1px solid #475569;border-radius:5px;">
+            <button type="submit" style="background:#3b82f6;color:white;padding:10px;border:none;border-radius:5px;width:100%;cursor:pointer;font-size:16px;">💾 Save Company</button>
+        </form>
+        <a href="/" style="color:#94a3b8;display:block;margin-top:12px;text-align:center;">⬅ Back to Dashboard</a>
+    </div>
+    
+    <script>
+        // PWA Install
+        let deferredPrompt;
+        const installBtn = document.getElementById('installBtn');
+        
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+            installBtn.style.display = 'block';
+        });
+        
+        installBtn.addEventListener('click', async () => {
+            if (deferredPrompt) {
+                deferredPrompt.prompt();
+                const { outcome } = await deferredPrompt.userChoice;
+                if (outcome === 'accepted') {
+                    installBtn.style.display = 'none';
+                }
+                deferredPrompt = null;
+            }
+        });
+        
+        window.addEventListener('appinstalled', () => {
+            installBtn.style.display = 'none';
+        });
+        
+        // Form Submit
+        document.getElementById('f').addEventListener('submit',async e=>{
+            e.preventDefault();
+            let r=await fetch('/api/companies',{
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({
+                    name:document.getElementById('n').value,
+                    ticker:document.getElementById('t').value.toUpperCase(),
+                    sector:document.getElementById('s').value,
+                    sub_sector:document.getElementById('sub').value||null
+                })
+            });
+            if(r.ok){window.location.href='/';}
+            else{let err=await r.json();alert('Error: '+(err.detail||'Failed'));}
+        });
+    </script>
 </body>
 </html>
