@@ -2,12 +2,58 @@
 <html>
 <head>
     <title>Financial Analyzer</title>
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="theme-color" content="#3b82f6">
+    <style>
+        .install-btn {
+            display: none;
+            background: #10b981;
+            color: white;
+            border: none;
+            padding: 10px 24px;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            margin-bottom: 20px;
+            font-weight: bold;
+        }
+        .install-btn:hover { background: #059669; }
+    </style>
 </head>
 <body style="background:#0f172a;color:white;padding:40px;font-family:Arial;">
     <div style="max-width:800px;margin:0 auto;">
         <h1>📊 Financial Analyzer</h1>
+        <button id="installBtn" class="install-btn">📲 Install App</button>
+        <br>
         <a href="/add-company" style="background:#3b82f6;color:white;padding:10px 24px;border-radius:8px;text-decoration:none;display:inline-block;">+ Add Company</a>
         <p>Dashboard loaded successfully!</p>
     </div>
+
+    <script>
+        // PWA Install
+        let deferredPrompt;
+        const installBtn = document.getElementById('installBtn');
+        
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+            installBtn.style.display = 'inline-block';
+        });
+        
+        installBtn.addEventListener('click', async () => {
+            if (deferredPrompt) {
+                deferredPrompt.prompt();
+                const { outcome } = await deferredPrompt.userChoice;
+                if (outcome === 'accepted') {
+                    installBtn.style.display = 'none';
+                }
+                deferredPrompt = null;
+            }
+        });
+        
+        window.addEventListener('appinstalled', () => {
+            installBtn.style.display = 'none';
+        });
+    </script>
 </body>
 </html>
