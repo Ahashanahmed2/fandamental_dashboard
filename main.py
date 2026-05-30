@@ -41,7 +41,7 @@ async def health_check_head():
 # ---------------------- Pages ----------------------
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    """Landing page - Company list"""
+    """Landing page - Company list with Edit/Delete"""
     companies = await db.companies.find({"is_active": True}).to_list(100)
     for c in companies:
         c["_id"] = str(c["_id"])
@@ -51,28 +51,237 @@ async def home(request: Request):
 <head>
     <title>Financial Analyzer</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="theme-color" content="#3b82f6">
+    <style>
+        body { background: #0f172a; color: white; padding: 40px; font-family: Arial; }
+        .company-card {
+            background: #1e293b; padding: 16px; border-radius: 10px;
+            margin-bottom: 12px; transition: all 0.3s;
+        }
+        .company-card:hover { background: #334155; }
+        .btn-action {
+            padding: 6px 12px; border-radius: 6px; text-decoration: none;
+            font-size: 13px; margin-right: 6px; border: none; cursor: pointer;
+            transition: all 0.2s; display: inline-block;
+        }
+        .btn-edit { background: #f59e0b; color: white; }
+        .btn-edit:hover { background: #d97706; }
+        .btn-delete { background: #ef4444; color: white; }
+        .btn-delete:hover { background: #dc2626; }
+        .btn-input { background: #10b981; color: white; }
+        .btn-input:hover { background: #059669; }
+        .btn-analysis { background: #06b6d4; color: white; }
+        .btn-analysis:hover { background: #0891b2; }
+        .modal-overlay {
+            display: none; position: fixed; top: 0; left: 0;
+            width: 100%; height: 100%; background: rgba(0,0,0,0.7);
+            z-index: 1000; justify-content: center; align-items: center;
+        }
+        .modal-box {
+            background: #1e293b; padding: 30px; border-radius: 15px;
+            width: 90%; max-width: 500px; color: white;
+        }
+        .toast {
+            position: fixed; bottom: 20px; right: 20px; padding: 12px 20px;
+            border-radius: 8px; color: white; z-index: 2000; display: none;
+        }
+        .toast-success { background: #10b981; }
+        .toast-error { background: #ef4444; }
+    </style>
 </head>
-<body style="background:#0f172a;color:white;padding:40px;font-family:Arial;">
+<body>
     <div style="max-width:800px;margin:0 auto;">
         <h1>📊 Financial Analyzer</h1>
         <a href="/add-company" style="background:#3b82f6;color:white;padding:10px 24px;border-radius:8px;text-decoration:none;display:inline-block;margin-bottom:20px;">+ Add Company</a>
+        <div id="companyList">
 """
     
     if companies:
         for c in companies:
             html += f"""
-        <div style="background:#1e293b;padding:16px;border-radius:10px;margin-bottom:12px;">
-            <strong>{c['name']}</strong> ({c['ticker']}) | {c.get('sector','')}
-            <div style="margin-top:8px;">
-                <a href="/input-data/{c['_id']}" style="color:#10b981;margin-right:12px;">📝 Input Data</a>
-                <a href="/analysis/{c['_id']}" style="color:#06b6d4;">📊 View Analysis</a>
-            </div>
-        </div>"""
+            <div class="company-card" id="company-{c['_id']}">
+                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+                    <div>
+                        <strong>{c['name']}</strong> ({c['ticker']}) | 
+                        <span style="background:#06b6d4;padding:2px 10px;border-radius:20px;font-size:12px;">{c.get('sector','')}</span>
+                    </div>
+                    <div>
+                        <button class="btn-action btn-edit" onclick="editCompany('{c['_id']}')" title="Edit">
+                            <i class="bi bi-pencil"></i> Edit
+                        </button>
+                        <button class="btn-action btn-delete" onclick="deleteCompany('{c['_id']}')" title="Delete">
+                            <i class="bi bi-trash"></i> Delete
+                        </button>
+                    </div>
+                </div>
+                <div style="margin-top:8px;">
+                    <a href="/input-data/{c['_id']}" class="btn-action btn-input">
+                        <i class="bi bi-pencil-square"></i> Input Data
+                    </a>
+                    <a href="/analysis/{c['_id']}" class="btn-action btn-analysis">
+                        <i class="bi bi-graph-up"></i> View Analysis
+                    </a>
+                </div>
+            </div>"""
     else:
         html += '<p style="margin-top:30px;color:#94a3b8;">No companies added yet. Click "Add Company" to get started.</p>'
     
     html += """
+        </div>
     </div>
+
+    <!-- Edit Modal -->
+    <div class="modal-overlay" id="editModal">
+        <div class="modal-box">
+            <h3>✏️ Edit Company</h3>
+            <form id="editForm">
+                <input type="hidden" id="editCompanyId">
+                <div class="mb-3">
+                    <label>Company Name</label>
+                    <input type="text" id="editName" class="form-control" required 
+                           style="background:#334155;color:white;border:1px solid #475569;">
+                </div>
+                <div class="mb-3">
+                    <label>Ticker</label>
+                    <input type="text" id="editTicker" class="form-control" required 
+                           style="background:#334155;color:white;border:1px solid #475569;">
+                </div>
+                <div class="mb-3">
+                    <label>Sector</label>
+                    <select id="editSector" class="form-control" 
+                            style="background:#334155;color:white;border:1px solid #475569;">
+                        <option value="Bank">🏦 Bank</option>
+                        <option value="Pharmaceuticals">💊 Pharmaceuticals</option>
+                        <option value="Textile">👕 Textile</option>
+                        <option value="Telecom">📱 Telecom</option>
+                        <option value="Food">🍔 Food & Beverage</option>
+                        <option value="Energy">⚡ Energy</option>
+                        <option value="Cement">🏗️ Cement</option>
+                        <option value="General">📦 General</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label>Sub Sector (Optional)</label>
+                    <input type="text" id="editSubSector" class="form-control" 
+                           style="background:#334155;color:white;border:1px solid #475569;">
+                </div>
+                <div style="display:flex;gap:10px;">
+                    <button type="submit" class="btn btn-primary" style="flex:1;">💾 Save Changes</button>
+                    <button type="button" class="btn btn-secondary" onclick="closeEditModal()" style="flex:1;">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div class="toast" id="toast"></div>
+
+    <script>
+        // Register Service Worker
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/static/sw.js');
+        }
+
+        // Show Toast
+        function showToast(message, type = 'success') {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = 'toast toast-' + type;
+            toast.style.display = 'block';
+            setTimeout(() => { toast.style.display = 'none'; }, 3000);
+        }
+
+        // Edit Company
+        async function editCompany(companyId) {
+            try {
+                const response = await fetch('/api/companies');
+                const companies = await response.json();
+                const company = companies.find(c => c._id === companyId);
+                
+                if (company) {
+                    document.getElementById('editCompanyId').value = company._id;
+                    document.getElementById('editName').value = company.name;
+                    document.getElementById('editTicker').value = company.ticker;
+                    document.getElementById('editSector').value = company.sector;
+                    document.getElementById('editSubSector').value = company.sub_sector || '';
+                    document.getElementById('editModal').style.display = 'flex';
+                }
+            } catch (error) {
+                showToast('Error loading company data', 'error');
+            }
+        }
+
+        function closeEditModal() {
+            document.getElementById('editModal').style.display = 'none';
+        }
+
+        document.getElementById('editForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const companyId = document.getElementById('editCompanyId').value;
+            
+            try {
+                const response = await fetch('/api/companies/' + companyId, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        name: document.getElementById('editName').value,
+                        ticker: document.getElementById('editTicker').value.toUpperCase(),
+                        sector: document.getElementById('editSector').value,
+                        sub_sector: document.getElementById('editSubSector').value || null
+                    })
+                });
+                
+                if (response.ok) {
+                    closeEditModal();
+                    showToast('Company updated successfully!');
+                    setTimeout(() => location.reload(), 500);
+                } else {
+                    const err = await response.json();
+                    showToast('Error: ' + (err.detail || 'Update failed'), 'error');
+                }
+            } catch (error) {
+                showToast('Error updating company', 'error');
+            }
+        });
+
+        // Delete Company
+        async function deleteCompany(companyId) {
+            const companyCard = document.getElementById('company-' + companyId);
+            const companyName = companyCard.querySelector('strong').textContent;
+            
+            if (confirm('Are you sure you want to delete "' + companyName + '"?\\n\\nThis action cannot be undone!')) {
+                try {
+                    const response = await fetch('/api/companies/' + companyId, {
+                        method: 'DELETE'
+                    });
+                    
+                    if (response.ok) {
+                        companyCard.remove();
+                        showToast('Company deleted successfully!');
+                        
+                        // Check if no companies left
+                        const remaining = document.querySelectorAll('.company-card');
+                        if (remaining.length === 0) {
+                            document.getElementById('companyList').innerHTML = 
+                                '<p style="margin-top:30px;color:#94a3b8;">No companies added yet. Click "Add Company" to get started.</p>';
+                        }
+                    } else {
+                        const err = await response.json();
+                        showToast('Error: ' + (err.detail || 'Delete failed'), 'error');
+                    }
+                } catch (error) {
+                    showToast('Error deleting company', 'error');
+                }
+            }
+        }
+
+        // Close modal on outside click
+        document.getElementById('editModal').addEventListener('click', function(e) {
+            if (e.target === this) closeEditModal();
+        });
+    </script>
 </body>
 </html>"""
     
@@ -496,6 +705,59 @@ async def list_companies():
     for c in companies:
         c["_id"] = str(c["_id"])
     return companies
+
+@app.put("/api/companies/{company_id}")
+async def update_company(company_id: str, company: CompanyCreate):
+    """Update a company"""
+    try:
+        obj_id = ObjectId(company_id)
+    except:
+        raise HTTPException(400, "Invalid company ID")
+
+    existing = await db.companies.find_one({"_id": obj_id})
+    if not existing:
+        raise HTTPException(404, "Company not found")
+
+    # Check ticker uniqueness (exclude current company)
+    duplicate = await db.companies.find_one({
+        "ticker": company.ticker.upper(),
+        "_id": {"$ne": obj_id}
+    })
+    if duplicate:
+        raise HTTPException(400, "Another company with this ticker already exists")
+
+    await db.companies.update_one(
+        {"_id": obj_id},
+        {"$set": {
+            "name": company.name,
+            "ticker": company.ticker.upper(),
+            "sector": company.sector,
+            "sub_sector": company.sub_sector,
+            "updated_at": datetime.utcnow()
+        }}
+    )
+    
+    return {"message": "Company updated successfully"}
+
+@app.delete("/api/companies/{company_id}")
+async def delete_company(company_id: str):
+    """Soft delete a company"""
+    try:
+        obj_id = ObjectId(company_id)
+    except:
+        raise HTTPException(400, "Invalid company ID")
+
+    existing = await db.companies.find_one({"_id": obj_id})
+    if not existing:
+        raise HTTPException(404, "Company not found")
+
+    # Soft delete
+    await db.companies.update_one(
+        {"_id": obj_id},
+        {"$set": {"is_active": False, "deleted_at": datetime.utcnow()}}
+    )
+    
+    return {"message": "Company deleted successfully"}
 
 @app.post("/api/financial-data")
 async def create_financial_data(data: FinancialDataCreate):
