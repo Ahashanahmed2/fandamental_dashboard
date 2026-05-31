@@ -1,7 +1,7 @@
 # analysis_engine.py
 import numpy as np
-from typing import Dict, List, Optional
-from schemas import DCFInputs  # 🆕 DCFInputs ইমপোর্ট অ্যাড করা হয়েছে
+from typing import Dict, List, Optional, Any
+from schemas import DCFInputs
 
 class DCFValuation:
     """Discounted Cash Flow ভ্যালুয়েশন ইঞ্জিন"""
@@ -39,7 +39,7 @@ class DCFValuation:
                 projected = base_fcf * (1 + growth)
             else:
                 projected = fcf_values[-1] * (1 + growth)
-            fcf_values.append(max(0, projected))  # নেগেটিভ FCF হ্যান্ডেল
+            fcf_values.append(max(0, projected))
 
         return fcf_values
 
@@ -47,10 +47,10 @@ class DCFValuation:
     def calculate_terminal_value(
         final_fcf: float,
         terminal_growth: float,
-        wacc: float    ) -> float:
-        """Gordon Growth Model দিয়ে টার্মিনাল ভ্যালু"""  # 🆕 নিউলাইন ফিক্স
+        wacc: float
+    ) -> float:
+        """Gordon Growth Model দিয়ে টার্মিনাল ভ্যালু"""
         if wacc <= terminal_growth:
-            # সেফটি চেক: wacc অবশ্যই terminal growth-এর চেয়ে বড় হতে হবে
             terminal_growth = wacc - 0.02
         return (final_fcf * (1 + terminal_growth)) / (wacc - terminal_growth)
 
@@ -73,7 +73,7 @@ class DCFValuation:
     @staticmethod
     def run_dcf(
         financial_data: Dict,
-        dcf_inputs: DCFInputs,  # ✅ এখন DCFImports ইমপোর্টেড আছে
+        dcf_inputs: DCFInputs,
         company_info: Dict
     ) -> Dict:
         """মেইন DCF ক্যালকুলেশন ফাংশন"""
@@ -90,19 +90,19 @@ class DCFValuation:
         # ২. WACC ক্যালকুলেশন (ইনপুট বা অটো)
         wacc = dcf_inputs.wacc
         if dcf_inputs.beta and dcf_inputs.risk_free_rate and dcf_inputs.market_risk_premium:
-            # CAPM: Cost of Equity = Rf + β(Rm - Rf)
             cost_of_equity = dcf_inputs.risk_free_rate + dcf_inputs.beta * dcf_inputs.market_risk_premium
             equity_value = current_price * shares_outstanding if current_price > 0 else 1
             debt_value = financial_data.get("total_debt", 0) or 0
             wacc = DCFValuation.calculate_wacc(
                 equity_value, 
-                debt_value,                 cost_of_equity, 
-                dcf_inputs.wacc * 0.7,  # cost_of_debt estimate
-                dcf_inputs.tax_rate  # 🆕 কমা ফিক্স করা হয়েছে
+                debt_value,
+                cost_of_equity, 
+                dcf_inputs.wacc * 0.7,
+                dcf_inputs.tax_rate
             )
 
         # ৩. FCF প্রজেকশন
-        growth_rates = dcf_inputs.revenue_growth_rates[:dcf_inputs.projection_years]
+        growth_rates = dcf_inputs.growth_rates[:dcf_inputs.projection_years]
         fcf_projections = DCFValuation.project_fcf(
             current_fcf, 
             growth_rates,
@@ -113,7 +113,7 @@ class DCFValuation:
         # ৪. টার্মিনাল ভ্যালু
         terminal_value = DCFValuation.calculate_terminal_value(
             fcf_projections[-1] if fcf_projections else 0,
-            dcf_inputs.terminal_growth_rate,
+            dcf_inputs.terminal_growth,
             wacc
         )
 
@@ -145,14 +145,14 @@ class DCFValuation:
             signal = "N/A"
             signal_color = "#64748b"
 
-        return {            # ইনপুট সামারি
+        return {
             "inputs": {
-                "wacc": round(wacc * 100, 2),
-                "terminal_growth": round(dcf_inputs.terminal_growth_rate * 100, 2),
+                "wacc_percent": round(wacc * 100, 2),
+                "terminal_growth_percent": round(dcf_inputs.terminal_growth * 100, 2),
                 "projection_years": dcf_inputs.projection_years,
-                "margin_of_safety": round(dcf_inputs.margin_of_safety * 100, 2)
+                "margin_of_safety_percent": round(dcf_inputs.margin_of_safety * 100, 2),
+                "growth_rates_percent": [round(g*100, 1) for g in growth_rates]
             },
-            # রেজাল্ট
             "enterprise_value": round(enterprise_value, 2),
             "equity_value": round(equity_value, 2),
             "intrinsic_value_per_share": round(intrinsic_value_per_share, 2),
@@ -161,14 +161,12 @@ class DCFValuation:
             "upside_percent": round(upside, 2) if upside else None,
             "signal": signal,
             "signal_color": signal_color,
-            # ডিটেইলস
             "fcf_projections": [round(f, 2) for f in fcf_projections],
-            "pv_fcf": round(discounted["pv_fcf"], 2),
+            "pv_fcf_sum": round(discounted["pv_fcf"], 2),
             "pv_terminal": round(discounted["pv_terminal"], 2),
             "terminal_value": round(terminal_value, 2),
-            # মেটাডেটা
-            "calculation_date": financial_data.get("created_at"),
-            "company_ticker": company_info.get("ticker")
+            "net_debt": round(net_debt, 2),
+            "calculation_note": "DCF based on Free Cash Flow projection with Gordon Growth Terminal Value"
         }
 
     @staticmethod
@@ -194,11 +192,245 @@ class DCFValuation:
                 if wacc <= tg:
                     continue
                 # সিম্পল টার্মিনাল-ফোকাসড ক্যালকুলেশন
-                final_fcf = base_fcf * np.prod([1+g for g in growth_rates])                tv = (final_fcf * (1+tg)) / (wacc - tg)
+                final_fcf = base_fcf * np.prod([1+g for g in growth_rates])
+                tv = (final_fcf * (1+tg)) / (wacc - tg)
                 pv_tv = tv / (1+wacc)**len(growth_rates)
                 equity = pv_tv - net_debt
-                value_per_share = equity / shares if shares > 0 else 0  # 🆕 নিউলাইন ফিক্স
+                value_per_share = equity / shares if shares > 0 else 0
                 row["values"][f"{round(tg*100,1)}%"] = round(value_per_share, 2)
             results.append(row)
 
         return results
+
+
+# ==================== Analysis Engine ====================
+
+class AnalysisEngine:
+    """Financial Analysis Engine - Core analysis logic"""
+    
+    def __init__(self):
+        self.benchmarks = {
+            "Bank": {
+                "debt_to_equity": 10.0,
+                "current_ratio": 1.0,
+                "roe": 12.0,
+                "npl_ratio": 5.0,
+                "car_ratio": 10.0
+            },
+            "Pharmaceuticals": {
+                "debt_to_equity": 1.0,
+                "current_ratio": 1.5,
+                "roe": 15.0,
+                "gross_margin": 40.0
+            },
+            "General": {
+                "debt_to_equity": 1.5,
+                "current_ratio": 1.5,
+                "roe": 12.0,
+                "gross_margin": 25.0
+            }
+        }
+    
+    def calculate_ratios(self, data: Dict) -> Dict:
+        """Calculate financial ratios from raw data"""
+        ratios = {}
+        
+        total_assets = data.get('total_assets', 0)
+        total_liabilities = data.get('total_liabilities', 0)
+        shareholders_equity = data.get('shareholders_equity', 0)
+        total_debt = data.get('total_debt', 0)
+        current_assets = data.get('current_assets', 0)
+        current_liabilities = data.get('current_liabilities', 0)
+        
+        revenue = data.get('revenue', 0)
+        gross_profit = data.get('gross_profit', 0)
+        operating_income = data.get('operating_income', 0)
+        ebit = data.get('ebit', 0)
+        ebitda = data.get('ebitda', 0)
+        interest_expense = data.get('interest_expense', 0)
+        net_income = data.get('net_income', 0)
+        
+        operating_cash_flow = data.get('operating_cash_flow', 0)
+        capex = data.get('capex', 0)
+        free_cash_flow = data.get('free_cash_flow', 0)
+        
+        eps = data.get('eps', 0)
+        dps = data.get('dps', 0)
+        shares_outstanding = data.get('shares_outstanding', 1)
+        current_price = data.get('current_price', 0)
+        
+        # Calculate Ratios
+        ratios['debt_to_equity'] = round(total_debt / shareholders_equity, 2) if shareholders_equity > 0 else 0
+        ratios['current_ratio'] = round(current_assets / current_liabilities, 2) if current_liabilities > 0 else 0
+        ratios['quick_ratio'] = round((current_assets - 0) / current_liabilities, 2) if current_liabilities > 0 else 0
+        
+        ratios['gross_margin'] = round((gross_profit / revenue) * 100, 2) if revenue > 0 else 0
+        ratios['operating_margin'] = round((operating_income / revenue) * 100, 2) if revenue > 0 else 0
+        ratios['net_margin'] = round((net_income / revenue) * 100, 2) if revenue > 0 else 0
+        
+        ratios['roe'] = round((net_income / shareholders_equity) * 100, 2) if shareholders_equity > 0 else 0
+        ratios['roa'] = round((net_income / total_assets) * 100, 2) if total_assets > 0 else 0
+        
+        ratios['interest_coverage'] = round(ebit / interest_expense, 2) if interest_expense > 0 else 999
+        
+        ratios['pe_ratio'] = round(current_price / eps, 2) if eps > 0 else 0
+        ratios['pb_ratio'] = round(current_price / (shareholders_equity / shares_outstanding), 2) if shares_outstanding > 0 and shareholders_equity > 0 else 0
+        ratios['dividend_yield'] = round((dps / current_price) * 100, 2) if current_price > 0 else 0
+        ratios['payout_ratio'] = round((dps / eps) * 100, 2) if eps > 0 else 0
+        
+        ratios['ev_to_ebitda'] = round((total_debt + (current_price * shares_outstanding) - data.get('cash_and_equivalents', 0)) / ebitda, 2) if ebitda > 0 else 0
+        
+        ratios['fcf_yield'] = round((free_cash_flow / (current_price * shares_outstanding)) * 100, 2) if current_price > 0 and shares_outstanding > 0 else 0
+        
+        if data.get('total_deposits'):
+            ratios['npl_ratio'] = data.get('npl_ratio', 0)
+            ratios['car_ratio'] = data.get('car_ratio', 0)
+            ratios['loan_to_deposit'] = round((data.get('total_loans', 0) / data.get('total_deposits', 1)) * 100, 2)
+        
+        return ratios
+    
+    def calculate_health_score(self, ratios: Dict, sector: str = "General") -> Dict:
+        """Calculate overall financial health score"""
+        sector_benchmarks = self.benchmarks.get(sector, self.benchmarks["General"])
+        metrics = []
+        total_score = 0
+        total_weight = 0
+        
+        scoring_criteria = [
+            {
+                "metric": "Debt to Equity",
+                "value": f"{ratios.get('debt_to_equity', 0):.2f}x",
+                "actual": ratios.get('debt_to_equity', 0),
+                "benchmark": sector_benchmarks.get('debt_to_equity', 1.5),
+                "weight": 10,
+                "lower_is_better": True
+            },
+            {
+                "metric": "Current Ratio",
+                "value": f"{ratios.get('current_ratio', 0):.2f}x",
+                "actual": ratios.get('current_ratio', 0),
+                "benchmark": sector_benchmarks.get('current_ratio', 1.5),
+                "weight": 10,
+                "lower_is_better": False
+            },
+            {
+                "metric": "ROE",
+                "value": f"{ratios.get('roe', 0):.1f}%",
+                "actual": ratios.get('roe', 0),
+                "benchmark": sector_benchmarks.get('roe', 12),
+                "weight": 15,
+                "lower_is_better": False
+            },
+            {
+                "metric": "Net Margin",
+                "value": f"{ratios.get('net_margin', 0):.1f}%",
+                "actual": ratios.get('net_margin', 0),
+                "benchmark": 10,
+                "weight": 15,
+                "lower_is_better": False
+            },
+            {
+                "metric": "Interest Coverage",
+                "value": f"{ratios.get('interest_coverage', 0):.2f}x",
+                "actual": ratios.get('interest_coverage', 0),
+                "benchmark": 3,
+                "weight": 15,
+                "lower_is_better": False
+            },
+            {
+                "metric": "P/E Ratio",
+                "value": f"{ratios.get('pe_ratio', 0):.2f}x",
+                "actual": ratios.get('pe_ratio', 0),
+                "benchmark": 15,
+                "weight": 15,
+                "lower_is_better": True
+            },
+            {
+                "metric": "Dividend Yield",
+                "value": f"{ratios.get('dividend_yield', 0):.1f}%",
+                "actual": ratios.get('dividend_yield', 0),
+                "benchmark": 3,
+                "weight": 10,
+                "lower_is_better": False
+            },
+            {
+                "metric": "FCF Yield",
+                "value": f"{ratios.get('fcf_yield', 0):.1f}%",
+                "actual": ratios.get('fcf_yield', 0),
+                "benchmark": 5,
+                "weight": 10,
+                "lower_is_better": False
+            }
+        ]
+        
+        for criteria in scoring_criteria:
+            actual = criteria['actual']
+            benchmark = criteria['benchmark']
+            weight = criteria['weight']
+            
+            if criteria['lower_is_better']:
+                if actual <= 0:
+                    score = 0
+                else:
+                    ratio = benchmark / actual
+                    score = min(100, ratio * 50)
+            else:
+                if benchmark <= 0:
+                    score = 0
+                else:
+                    ratio = actual / benchmark
+                    score = min(100, ratio * 50)
+            
+            if score >= 80:
+                color = "#10b981"
+                color_name = "Excellent"
+            elif score >= 60:
+                color = "#3b82f6"
+                color_name = "Good"
+            elif score >= 40:
+                color = "#f59e0b"
+                color_name = "Average"
+            elif score >= 20:
+                color = "#ef4444"
+                color_name = "Poor"
+            else:
+                color = "#dc2626"
+                color_name = "Critical"
+            
+            metrics.append({
+                "metric": criteria['metric'],
+                "value": criteria['value'],
+                "score": round(score, 1),
+                "color": color,
+                "color_name": color_name,
+                "weight": weight
+            })
+            
+            total_score += score * weight
+            total_weight += weight
+        
+        overall_score = round(total_score / total_weight, 1) if total_weight > 0 else 0
+        
+        if overall_score >= 80:
+            overall_color = "#10b981"
+            overall_color_name = "Excellent"
+        elif overall_score >= 60:
+            overall_color = "#3b82f6"
+            overall_color_name = "Good"
+        elif overall_score >= 40:
+            overall_color = "#f59e0b"
+            overall_color_name = "Average"
+        elif overall_score >= 20:
+            overall_color = "#ef4444"
+            overall_color_name = "Poor"
+        else:
+            overall_color = "#dc2626"
+            overall_color_name = "Critical"
+        
+        return {
+            "overall_score": overall_score,
+            "overall_color": overall_color,
+            "overall_color_name": overall_color_name,
+            "metrics": metrics,
+            "ratios": ratios
+        }
