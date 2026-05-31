@@ -4,9 +4,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from bson import ObjectId
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict
 import json
 import os
+import math
 
 from database import db, init_db
 from schemas import CompanyCreate, FinancialDataCreate
@@ -21,6 +22,108 @@ templates.env.cache = None
 
 # Analysis Engine instance
 engine = AnalysisEngine()
+
+# ==================== 🆕 DCF VALUATION ENGINE (নতুন অ্যাড করা হয়েছে) ====================
+class DCFValuation:
+    """Discounted Cash Flow ভ্যালুয়েশন ইঞ্জিন - সরল ও এফিশিয়েন্ট"""
+    
+    @staticmethod
+    def calculate_terminal_value(final_fcf: float, terminal_growth: float, wacc: float) -> float:
+        """Gordon Growth Model: TV = FCFₙ₊₁ / (WACC - g)"""
+        if wacc <= terminal_growth:
+            terminal_growth = wacc - 0.02  # সেফটি ফলব্যাক
+        return (final_fcf * (1 + terminal_growth)) / (wacc - terminal_growth)
+    
+    @staticmethod
+    def discount_value(future_value: float, wacc: float, year: int) -> float:
+        """Present Value ক্যালকুলেশন: PV = FV / (1+r)^n"""
+        return future_value / ((1 + wacc) ** year)
+    
+    @staticmethod
+    def run_dcf(financial_data: Dict, dcf_params: Dict, company_info: Dict) -> Dict:
+        """মেইন DCF ক্যালকুলেশন ফাংশন"""
+        
+        # ১. বেসিক ডেটা এক্সট্রাক্ট
+        revenue = financial_data.get("revenue", 0) or 0
+        current_fcf = financial_data.get("free_cash_flow", 0) or 0
+        fcf_margin = financial_data.get("fcf_margin", 0) or (current_fcf / revenue if revenue > 0 else 0.05)
+                shares_outstanding = financial_data.get("shares_outstanding", 1) or 1
+        net_debt = (financial_data.get("total_debt", 0) or 0) - (financial_data.get("cash_and_equivalents", 0) or 0)
+        current_price = financial_data.get("current_price", 0) or 0
+        
+        # ২. DCF প্যারামিটার্স (ডিফল্ট ভ্যালু সহ)
+        projection_years = dcf_params.get("projection_years", 5)
+        growth_rates = dcf_params.get("growth_rates", [0.08, 0.07, 0.06, 0.05, 0.04])[:projection_years]
+        wacc = dcf_params.get("wacc", 0.15)
+        terminal_growth = dcf_params.get("terminal_growth", 0.03)
+        margin_of_safety = dcf_params.get("margin_of_safety", 0.20)
+        
+        # ৩. FCF প্রজেকশন (কনজারভেটিভ অ্যাপ্রোচ)
+        base_fcf = current_fcf if current_fcf > 0 else revenue * fcf_margin
+        fcf_projections = []
+        for i, growth in enumerate(growth_rates):
+            if i == 0:
+                projected = base_fcf * (1 + growth)
+            else:
+                projected = fcf_projections[-1] * (1 + growth)
+            fcf_projections.append(max(0, projected))  # নেগেটিভ FCF হ্যান্ডেল
+        
+        # ৪. PV of Projected FCF
+        pv_fcf_sum = sum([DCFValuation.discount_value(fcf, wacc, i+1) for i, fcf in enumerate(fcf_projections)])
+        
+        # ৫. Terminal Value & PV
+        terminal_value = DCFValuation.calculate_terminal_value(fcf_projections[-1], terminal_growth, wacc)
+        pv_terminal = DCFValuation.discount_value(terminal_value, wacc, projection_years)
+        
+        # ৬. Enterprise Value → Equity Value → Per Share Value
+        enterprise_value = pv_fcf_sum + pv_terminal
+        equity_value = enterprise_value - net_debt
+        intrinsic_value_per_share = equity_value / shares_outstanding if shares_outstanding > 0 else 0
+        
+        # ৭. Margin of Safety Adjusted Value
+        mos_adjusted_value = intrinsic_value_per_share * (1 - margin_of_safety)
+        
+        # ৮. Investment Signal (BUY/HOLD/SELL)
+        if current_price > 0:
+            upside = ((intrinsic_value_per_share - current_price) / current_price) * 100
+            if intrinsic_value_per_share > current_price * (1 + margin_of_safety):
+                signal = "BUY"
+                signal_color = "#10b981"
+            elif intrinsic_value_per_share < current_price * (1 - margin_of_safety):
+                signal = "SELL"
+                signal_color = "#ef4444"
+            else:
+                signal = "HOLD"
+                signal_color = "#f59e0b"
+        else:
+            upside = None            signal = "N/A"
+            signal_color = "#64748b"
+        
+        return {
+            "inputs": {
+                "wacc_percent": round(wacc * 100, 2),
+                "terminal_growth_percent": round(terminal_growth * 100, 2),
+                "projection_years": projection_years,
+                "margin_of_safety_percent": round(margin_of_safety * 100, 2),
+                "growth_rates_percent": [round(g*100, 1) for g in growth_rates]
+            },
+            "enterprise_value": round(enterprise_value, 2),
+            "equity_value": round(equity_value, 2),
+            "intrinsic_value_per_share": round(intrinsic_value_per_share, 2),
+            "mos_adjusted_value": round(mos_adjusted_value, 2),
+            "current_price": current_price,
+            "upside_percent": round(upside, 2) if upside is not None else None,
+            "signal": signal,
+            "signal_color": signal_color,
+            "fcf_projections": [round(f, 2) for f in fcf_projections],
+            "pv_fcf_sum": round(pv_fcf_sum, 2),
+            "pv_terminal": round(pv_terminal, 2),
+            "terminal_value": round(terminal_value, 2),
+            "net_debt": round(net_debt, 2),
+            "calculation_note": "DCF based on Free Cash Flow projection with Gordon Growth Terminal Value"
+        }
+# ==================== ✅ DCF ENGINE END ====================
+
 
 # ---------------------- Startup ----------------------
 @app.on_event("startup")
@@ -42,10 +145,9 @@ async def health_check_head():
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     """Landing page - Company list with Edit/Delete"""
-    companies = await db.companies.find({"is_active": True}).to_list(100)
-    for c in companies:
+    companies = await db.companies.find({"is_active": True}).to_list(100)    for c in companies:
         c["_id"] = str(c["_id"])
-    
+
     html = """<!DOCTYPE html>
 <html>
 <head>
@@ -92,12 +194,11 @@ async def home(request: Request):
     </style>
 </head>
 <body>
-    <div style="max-width:800px;margin:0 auto;">
-        <h1>📊 Financial Analyzer</h1>
+    <div style="max-width:800px;margin:0 auto;">        <h1>📊 Financial Analyzer</h1>
         <a href="/add-company" style="background:#3b82f6;color:white;padding:10px 24px;border-radius:8px;text-decoration:none;display:inline-block;margin-bottom:20px;">+ Add Company</a>
         <div id="companyList">
 """
-    
+
     if companies:
         for c in companies:
             html += f"""
@@ -127,7 +228,7 @@ async def home(request: Request):
             </div>"""
     else:
         html += '<p style="margin-top:30px;color:#94a3b8;">No companies added yet. Click "Add Company" to get started.</p>'
-    
+
     html += """
         </div>
     </div>
@@ -142,8 +243,7 @@ async def home(request: Request):
                     <label>Company Name</label>
                     <input type="text" id="editName" class="form-control" required 
                            style="background:#334155;color:white;border:1px solid #475569;">
-                </div>
-                <div class="mb-3">
+                </div>                <div class="mb-3">
                     <label>Ticker</label>
                     <input type="text" id="editTicker" class="form-control" required 
                            style="background:#334155;color:white;border:1px solid #475569;">
@@ -192,7 +292,6 @@ async def home(request: Request):
             toast.style.display = 'block';
             setTimeout(() => { toast.style.display = 'none'; }, 3000);
         }
-
         // Edit Company
         async function editCompany(companyId) {
             try {
@@ -242,8 +341,7 @@ async def home(request: Request):
                     showToast('Error: ' + (err.detail || 'Update failed'), 'error');
                 }
             } catch (error) {
-                showToast('Error updating company', 'error');
-            }
+                showToast('Error updating company', 'error');            }
         });
 
         // Delete Company
@@ -284,7 +382,7 @@ async def home(request: Request):
     </script>
 </body>
 </html>"""
-    
+
     return HTMLResponse(content=html)
 
 @app.get("/add-company", response_class=HTMLResponse)
@@ -292,8 +390,7 @@ async def add_company_page(request: Request):
     """Form to add new company"""
     html = """<!DOCTYPE html>
 <html>
-<head>
-    <title>Add Company</title>
+<head>    <title>Add Company</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
 <body style="background:#0f172a;color:white;padding:40px;font-family:Arial;">
@@ -342,18 +439,18 @@ async def add_company_page(request: Request):
 async def input_data_page(request: Request, company_id: str):
     """Form to input financial data"""
     try:
-        company = await db.companies.find_one({"_id": ObjectId(company_id)})
-    except:
+        company = await db.companies.find_one({"_id": ObjectId(company_id)})    except:
         raise HTTPException(400, "Invalid company ID")
 
     if not company:
         raise HTTPException(404, "Company not found")
-    
+
     company_id_str = str(company["_id"])
     company_name = company["name"]
     company_ticker = company["ticker"]
     company_sector = company["sector"]
-    
+
+    # 🆕 DCF Section HTML added below
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -370,6 +467,7 @@ async def input_data_page(request: Request, company_id: str):
         .btn-submit:hover {{ background: #219a52; }}
         label {{ font-weight: 600; margin-top: 8px; }}
         input, select {{ margin-bottom: 6px; }}
+        .dcf-note {{ font-size: 12px; color: #64748b; margin-top: 4px; }}
     </style>
 </head>
 <body>
@@ -390,8 +488,7 @@ async def input_data_page(request: Request, company_id: str):
                             <option value="annual">Annual</option>
                             <option value="quarterly">Quarterly</option>
                         </select>
-                    </div>
-                    <div class="col-md-3">
+                    </div>                    <div class="col-md-3">
                         <label>Year *</label>
                         <input type="number" class="form-control" id="year" placeholder="2024" required>
                     </div>
@@ -440,8 +537,7 @@ async def input_data_page(request: Request, company_id: str):
             </div>
 
             <div class="form-section">
-                <h5 class="section-title">💵 Cash Flow</h5>
-                <div class="row">
+                <h5 class="section-title">💵 Cash Flow</h5>                <div class="row">
                     <div class="col-md-4"><label>Operating Cash Flow</label><input type="number" step="0.01" class="form-control" id="ocf" placeholder="0.00"></div>
                     <div class="col-md-4"><label>CAPEX</label><input type="number" step="0.01" class="form-control" id="capex" placeholder="0.00"></div>
                     <div class="col-md-4"><label>Free Cash Flow</label><input type="number" step="0.01" class="form-control" id="fcf" placeholder="0.00"></div>
@@ -455,6 +551,46 @@ async def input_data_page(request: Request, company_id: str):
                     <div class="col-md-3"><label>DPS</label><input type="number" step="0.01" class="form-control" id="dps" placeholder="0.00"></div>
                     <div class="col-md-3"><label>Shares Outstanding (M)</label><input type="number" step="0.01" class="form-control" id="sharesOut" placeholder="0.00"></div>
                     <div class="col-md-3"><label>Current Stock Price</label><input type="number" step="0.01" class="form-control" id="currentPrice" placeholder="0.00"></div>
+                </div>
+            </div>
+
+            <!-- 🆕 DCF Valuation Settings Section -->
+            <div class="form-section" id="dcfSection">
+                <h5 class="section-title">📊 DCF Valuation Settings <small style="font-weight:normal;color:#64748b;">(Optional - Auto-calculated if skipped)</small></h5>
+                <p class="dcf-note">💡 DCF uses your FCF + Revenue data. Adjust assumptions below for custom valuation.</p>
+                
+                <div class="row mb-3">
+                    <div class="col-md-3">
+                        <label>Projection Years</label>
+                        <select class="form-control" id="dcfYears">
+                            <option value="5">5 Years</option>
+                            <option value="7">7 Years</option>
+                            <option value="10">10 Years</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label>WACC (%)</label>
+                        <input type="number" step="0.1" class="form-control" id="dcfWacc" value="15.0" min="5" max="30">
+                        <small class="dcf-note">Discount rate for Bangladesh market</small>
+                    </div>
+                    <div class="col-md-3">
+                        <label>Terminal Growth (%)</label>
+                        <input type="number" step="0.1" class="form-control" id="dcfTermGrowth" value="3.0" min="0" max="6">
+                        <small class="dcf-note">Long-term GDP growth assumption</small>
+                    </div>
+                    <div class="col-md-3">
+                        <label>Margin of Safety (%)</label>
+                        <input type="number" step="1" class="form-control" id="dcfMos" value="20" min="0" max="50">
+                        <small class="dcf-note">Buffer for uncertainty</small>
+                    </div>
+                </div>
+                
+                <!-- Growth Rates Input -->
+                <div class="mb-3">                    <label>Annual Growth Rates (%) for FCF Projection</label>
+                    <div id="growthRatesContainer" class="d-flex gap-2 flex-wrap">
+                        <!-- JavaScript will populate this -->
+                    </div>
+                    <small class="dcf-note">Year-by-year growth assumption for Free Cash Flow</small>
                 </div>
             </div>
 
@@ -476,21 +612,44 @@ async def input_data_page(request: Request, company_id: str):
     </div>
 
     <script>
+        // Report Type Toggle
         document.getElementById('reportType').addEventListener('change', function() {{
             document.getElementById('quarterDiv').style.display = this.value === 'quarterly' ? 'block' : 'none';
         }});
         
+        // Bank Fields Toggle
         var sector = "{company_sector}";
         if (sector === "Bank") {{
             document.getElementById('bankFields').style.display = 'block';
         }}
 
+        // 🆕 DCF: Dynamic Growth Rate Inputs
+        function renderGrowthInputs(years = 5) {{
+            const container = document.getElementById('growthRatesContainer');
+            container.innerHTML = '';
+            const defaults = [8, 7, 6, 5, 4, 3.5, 3, 2.5, 2, 1.5];
+            for(let i = 0; i < years; i++) {{
+                container.innerHTML += `
+                    <div style="min-width:75px;">
+                        <label style="font-size:11px;">Y{i{plus}1}</label>
+                        <input type="number" step="0.1" class="form-control form-control-sm growth-rate" 
+                               value="${{defaults[i] || 3}}" min="0" max="50" data-year="${{i+1}}">
+                    </div>
+                `;            }}
+        }}
+        renderGrowthInputs(5);
+        document.getElementById('dcfYears').addEventListener('change', (e) => {{
+            renderGrowthInputs(parseInt(e.target.value));
+        }});
+
+        // Form Submit Handler
         document.getElementById('financialForm').addEventListener('submit', async function(e) {{
             e.preventDefault();
             var btn = this.querySelector('button[type="submit"]');
             btn.disabled = true;
             btn.innerHTML = '⏳ Analyzing...';
             
+            // Collect basic financial data
             var data = {{
                 company_id: document.getElementById('companyId').value,
                 report_type: document.getElementById('reportType').value,
@@ -521,7 +680,14 @@ async def input_data_page(request: Request, company_id: str):
                 total_loans: parseFloat(document.getElementById('totalLoans')?.value) || null,
                 npl_ratio: parseFloat(document.getElementById('nplRatio')?.value) || null,
                 car_ratio: parseFloat(document.getElementById('carRatio')?.value) || null,
-                net_interest_income: parseFloat(document.getElementById('nii')?.value) || null
+                net_interest_income: parseFloat(document.getElementById('nii')?.value) || null,
+                // 🆕 DCF Parameters
+                dcf_params: {{
+                    projection_years: parseInt(document.getElementById('dcfYears').value),
+                    growth_rates: Array.from(document.querySelectorAll('.growth-rate')).map(inp => parseFloat(inp.value)/100),                    wacc: parseFloat(document.getElementById('dcfWacc').value)/100,
+                    terminal_growth: parseFloat(document.getElementById('dcfTermGrowth').value)/100,
+                    margin_of_safety: parseFloat(document.getElementById('dcfMos').value)/100
+                }}
             }};
             
             try {{
@@ -547,7 +713,7 @@ async def input_data_page(request: Request, company_id: str):
     </script>
 </body>
 </html>"""
-    
+
     return HTMLResponse(content=html)
 
 @app.get("/analysis/{company_id}", response_class=HTMLResponse)
@@ -567,8 +733,7 @@ async def view_analysis(request: Request, company_id: str):
     company_sector = company.get("sector", "")
 
     financials = await db.financial_data.find(
-        {"company_id": ObjectId(company_id)}
-    ).sort([("year", -1), ("quarter", -1)]).to_list(10)
+        {"company_id": ObjectId(company_id)}    ).sort([("year", -1), ("quarter", -1)]).to_list(10)
 
     analyses_html = ""
     for fin in financials:
@@ -581,7 +746,7 @@ async def view_analysis(request: Request, company_id: str):
             score = analysis.get("overall_score", 0)
             color = analysis.get("overall_color", "#fff")
             color_name = analysis.get("overall_color_name", "")
-            
+
             metrics_rows = ""
             for m in analysis.get("metrics", []):
                 metrics_rows += f"""<tr>
@@ -590,7 +755,18 @@ async def view_analysis(request: Request, company_id: str):
                     <td>{m.get('score','')}%</td>
                     <td style="background:{m.get('color','')};color:white;font-weight:bold;">{m.get('color_name','')}</td>
                 </tr>"""
-            
+
+            # 🆕 DCF Result Section in Analysis View
+            dcf_html = ""
+            if analysis.get("dcf_valuation"):
+                dcf = analysis["dcf_valuation"]
+                dcf_html = f"""
+                <div style="margin-top:15px;padding:12px;background:rgba(6,182,212,0.1);border-radius:8px;border-left:4px solid #06b6d4;">
+                    <strong>📊 DCF Value:</strong> {dcf.get('intrinsic_value_per_share', 'N/A')} টাকা 
+                    <span style="background:{dcf.get('signal_color','#64748b')};color:white;padding:2px 10px;border-radius:12px;font-size:12px;margin-left:8px;">{dcf.get('signal','N/A')}</span>
+                    {f"<span style='color:#10b981;margin-left:8px;'>↑ {dcf.get('upside_percent',0)}% upside</span>" if dcf.get('upside_percent') and dcf.get('upside_percent') > 0 else ""}
+                </div>"""
+
             analyses_html += f"""
             <div style="background:#1e293b;padding:20px;border-radius:15px;margin-bottom:20px;">
                 <h4>{rtype} - {year}{quarter}</h4>
@@ -602,11 +778,11 @@ async def view_analysis(request: Request, company_id: str):
                     <thead><tr style="background:#334155;"><th style="padding:12px;text-align:left;">Metric</th><th style="padding:12px;">Value</th><th style="padding:12px;">Score</th><th style="padding:12px;">Status</th></tr></thead>
                     <tbody>{metrics_rows}</tbody>
                 </table>
+                {dcf_html}
             </div>"""
-    
+
     if not analyses_html:
         analyses_html = '<div style="text-align:center;padding:40px;"><h4>No analysis data found</h4><a href="/input-data/' + company_id_str + '" style="color:#10b981;">📝 Add Financial Data</a></div>'
-
     html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -625,7 +801,7 @@ async def view_analysis(request: Request, company_id: str):
     </div>
 </body>
 </html>"""
-    
+
     return HTMLResponse(content=html)
 
 @app.get("/result/{financial_id}", response_class=HTMLResponse)
@@ -634,7 +810,7 @@ async def view_result(request: Request, financial_id: str):
     analysis = await db.analysis_results.find_one({"financial_data_id": financial_id})
     if not analysis:
         raise HTTPException(404, "Analysis not found")
-    
+
     name = analysis.get("company_name", "")
     ticker = analysis.get("ticker", "")
     sector = analysis.get("sector", "")
@@ -644,7 +820,7 @@ async def view_result(request: Request, financial_id: str):
     score = analysis.get("overall_score", 0)
     color = analysis.get("overall_color", "#fff")
     color_name = analysis.get("overall_color_name", "")
-    
+
     metrics_rows = ""
     for m in analysis.get("metrics", []):
         metrics_rows += f"""<tr>
@@ -653,7 +829,71 @@ async def view_result(request: Request, financial_id: str):
             <td>{m.get('score','')}%</td>
             <td style="background:{m.get('color','')};color:white;font-weight:bold;">{m.get('color_name','')}</td>
         </tr>"""
-    
+
+    # 🆕 DCF Result Card - Full Display
+    dcf_card = ""    if analysis.get("dcf_valuation"):
+        dcf = analysis["dcf_valuation"]
+        fcf_rows = "".join([f"<tr><td>Year {i+1}</td><td>{val} M</td></tr>" for i, val in enumerate(dcf.get('fcf_projections', []))])
+        
+        dcf_card = f"""
+        <div style="margin-top:30px;background:#1e293b;padding:25px;border-radius:15px;border:2px solid #06b6d4;">
+            <h4 style="text-align:center;color:#06b6d4;margin-bottom:20px;">📊 DCF Intrinsic Valuation</h4>
+            
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:15px;text-align:center;margin-bottom:25px;">
+                <div style="background:#334155;padding:15px;border-radius:10px;">
+                    <div style="color:#94a3b8;font-size:13px;">Current Price</div>
+                    <div style="font-size:1.3rem;font-weight:bold;">{dcf.get('current_price',0)} টাকা</div>
+                </div>
+                <div style="background:#334155;padding:15px;border-radius:10px;">
+                    <div style="color:#94a3b8;font-size:13px;">Intrinsic Value</div>
+                    <div style="font-size:1.3rem;font-weight:bold;color:#10b981;">{dcf.get('intrinsic_value_per_share',0)} টাকা</div>
+                </div>
+                <div style="background:#334155;padding:15px;border-radius:10px;">
+                    <div style="color:#94a3b8;font-size:13px;">MoS Value</div>
+                    <div style="font-size:1.3rem;font-weight:bold;color:#f59e0b;">{dcf.get('mos_adjusted_value',0)} টাকা</div>
+                </div>
+                <div style="background:#334155;padding:15px;border-radius:10px;">
+                    <div style="color:#94a3b8;font-size:13px;">Upside</div>
+                    <div style="font-size:1.3rem;font-weight:bold;color:{dcf.get('signal_color','#64748b')};">{dcf.get('upside_percent','N/A')}%</div>
+                </div>
+            </div>
+            
+            <div style="text-align:center;margin:20px 0;">
+                <span style="background:{dcf.get('signal_color','#64748b')};color:white;padding:10px 30px;border-radius:30px;font-weight:bold;font-size:1.2rem;">
+                    {dcf.get('signal','N/A')} SIGNAL
+                </span>
+            </div>
+            
+            <details style="margin-top:20px;">
+                <summary style="cursor:pointer;color:#94a3b8;font-weight:500;">🔍 DCF Calculation Details</summary>
+                <div style="margin-top:15px;background:#334155;padding:15px;border-radius:8px;">
+                    <table style="width:100%;font-size:14px;">
+                        <tr><td style="padding:6px 0;">WACC</td><td style="padding:6px 0;text-align:right;">{dcf.get('inputs',{}).get('wacc_percent','N/A')}%</td></tr>
+                        <tr><td style="padding:6px 0;">Terminal Growth</td><td style="padding:6px 0;text-align:right;">{dcf.get('inputs',{}).get('terminal_growth_percent','N/A')}%</td></tr>
+                        <tr><td style="padding:6px 0;">Projection Period</td><td style="padding:6px 0;text-align:right;">{dcf.get('inputs',{}).get('projection_years','N/A')} Years</td></tr>
+                        <tr><td style="padding:6px 0;">Margin of Safety</td><td style="padding:6px 0;text-align:right;">{dcf.get('inputs',{}).get('margin_of_safety_percent','N/A')}%</td></tr>
+                        <tr><td style="padding:6px 0;">PV of FCF</td><td style="padding:6px 0;text-align:right;">{dcf.get('pv_fcf_sum','N/A')} M</td></tr>
+                        <tr><td style="padding:6px 0;">PV of Terminal</td><td style="padding:6px 0;text-align:right;">{dcf.get('pv_terminal','N/A')} M</td></tr>
+                        <tr><td style="padding:6px 0;">Enterprise Value</td><td style="padding:6px 0;text-align:right;">{dcf.get('enterprise_value','N/A')} M</td></tr>
+                        <tr><td style="padding:6px 0;">Net Debt</td><td style="padding:6px 0;text-align:right;">{dcf.get('net_debt','N/A')} M</td></tr>
+                    </table>
+                </div>
+            </details>
+            
+            <details style="margin-top:15px;">                <summary style="cursor:pointer;color:#94a3b8;font-weight:500;">📈 FCF Projections</summary>
+                <div style="margin-top:10px;background:#334155;padding:10px;border-radius:8px;">
+                    <table style="width:100%;font-size:13px;">
+                        <thead><tr style="border-bottom:1px solid #475569;"><th style="padding:8px;text-align:left;">Year</th><th style="padding:8px;text-align:right;">Projected FCF</th></tr></thead>
+                        <tbody>{fcf_rows}</tbody>
+                    </table>
+                </div>
+            </details>
+            
+            <p style="margin-top:15px;font-size:12px;color:#94a3b8;text-align:center;">
+                💡 {dcf.get('calculation_note','')}
+            </p>
+        </div>"""
+
     html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -672,11 +912,12 @@ async def view_result(request: Request, financial_id: str):
             <thead><tr style="background:#334155;"><th style="padding:12px;text-align:left;">Metric</th><th style="padding:12px;">Value</th><th style="padding:12px;">Score</th><th style="padding:12px;">Status</th></tr></thead>
             <tbody>{metrics_rows}</tbody>
         </table>
+        {dcf_card}
         <a href="/" style="display:inline-block;margin-top:20px;color:#94a3b8;">← Back to Dashboard</a>
     </div>
 </body>
 </html>"""
-    
+
     return HTMLResponse(content=html)
 
 # ---------------------- API Endpoints ----------------------
@@ -688,8 +929,7 @@ async def create_company(company: CompanyCreate):
         raise HTTPException(400, "Company with this ticker already exists")
 
     doc = {
-        "name": company.name,
-        "ticker": company.ticker.upper(),
+        "name": company.name,        "ticker": company.ticker.upper(),
         "sector": company.sector,
         "sub_sector": company.sub_sector,
         "is_active": True,
@@ -736,9 +976,8 @@ async def update_company(company_id: str, company: CompanyCreate):
             "updated_at": datetime.utcnow()
         }}
     )
-    
-    return {"message": "Company updated successfully"}
 
+    return {"message": "Company updated successfully"}
 @app.delete("/api/companies/{company_id}")
 async def delete_company(company_id: str):
     """Soft delete a company"""
@@ -756,12 +995,12 @@ async def delete_company(company_id: str):
         {"_id": obj_id},
         {"$set": {"is_active": False, "deleted_at": datetime.utcnow()}}
     )
-    
+
     return {"message": "Company deleted successfully"}
 
 @app.post("/api/financial-data")
 async def create_financial_data(data: FinancialDataCreate):
-    """Input financial data and run analysis"""
+    """Input financial data and run analysis + DCF"""
     try:
         company_oid = ObjectId(data.company_id)
     except:
@@ -771,16 +1010,25 @@ async def create_financial_data(data: FinancialDataCreate):
     if not company:
         raise HTTPException(404, "Company not found")
 
+    # Convert Pydantic model to dict and add metadata
     doc = data.model_dump()
     doc["company_id"] = company_oid
     doc["created_at"] = datetime.utcnow()
 
+    # Save financial data
     result = await db.financial_data.insert_one(doc)
     financial_id = str(result.inserted_id)
 
+    # Run regular ratio analysis
     ratios = engine.calculate_ratios(doc)
     health_analysis = engine.calculate_health_score(ratios, company.get("sector", "General"))
 
+    # 🆕 Run DCF Valuation (if FCF data available)
+    dcf_result = None
+    if doc.get("free_cash_flow", 0) > 0 or doc.get("revenue", 0) > 0:
+        dcf_params = getattr(data, 'dcf_params', None) or {}
+        dcf_result = DCFValuation.run_dcf(doc, dcf_params, company)
+    # Save analysis results with DCF
     analysis_doc = {
         "company_id": company_oid,
         "financial_data_id": financial_id,
@@ -795,6 +1043,7 @@ async def create_financial_data(data: FinancialDataCreate):
         "overall_color_name": health_analysis["overall_color_name"],
         "metrics": health_analysis["metrics"],
         "ratios": health_analysis["ratios"],
+        "dcf_valuation": dcf_result,  # 🆕 DCF result added
         "created_at": datetime.utcnow(),
     }
     await db.analysis_results.insert_one(analysis_doc)
@@ -802,6 +1051,7 @@ async def create_financial_data(data: FinancialDataCreate):
     return {
         "financial_id": financial_id,
         "analysis": health_analysis,
+        "dcf": dcf_result,  # 🆕 Return DCF to frontend
     }
 
 @app.get("/api/analysis/{financial_data_id}")
@@ -826,10 +1076,11 @@ async def compare_companies(sector: str):
 
         if analysis:
             comparison.append({
-                "company_name": company["name"],
-                "ticker": company["ticker"],
+                "company_name": company["name"],                "ticker": company["ticker"],
                 "overall_score": analysis["overall_score"],
                 "overall_color": analysis["overall_color"],
+                "dcf_signal": analysis.get("dcf_valuation", {}).get("signal"),
+                "dcf_upside": analysis.get("dcf_valuation", {}).get("upside_percent"),
             })
 
     return sorted(comparison, key=lambda x: x["overall_score"], reverse=True)
