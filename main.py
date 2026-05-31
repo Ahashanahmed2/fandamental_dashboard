@@ -10,8 +10,8 @@ import os
 import math
 
 from database import db, init_db
-from schemas import CompanyCreate, FinancialDataCreate
-from analysis_engine import AnalysisEngine, DCFValuation
+from schemas import CompanyCreate, FinancialDataCreate, FinancialDataUpdate
+from analysis_engine import AnalysisEngine
 
 app = FastAPI(title="Financial Health Analyzer")
 
@@ -23,8 +23,8 @@ templates.env.cache = None
 # Analysis Engine instance
 engine = AnalysisEngine()
 
-# ==================== DCF VALUATION ENGINE ====================
-class DCFValuationEngine:
+# ==================== 🆕 DCF VALUATION ENGINE (নতুন অ্যাড করা হয়েছে) ====================
+class DCFValuation:
     """Discounted Cash Flow ভ্যালুয়েশন ইঞ্জিন - সরল ও এফিশিয়েন্ট"""
 
     @staticmethod
@@ -58,7 +58,7 @@ class DCFValuationEngine:
         terminal_growth = dcf_params.get("terminal_growth", 0.03)
         margin_of_safety = dcf_params.get("margin_of_safety", 0.20)
 
-        # ৩. FCF প্রজেকশন
+        # ৩. FCF প্রজেকশন (কনজারভেটিভ অ্যাপ্রোচ)
         base_fcf = current_fcf if current_fcf > 0 else revenue * fcf_margin
         fcf_projections = []
         for i, growth in enumerate(growth_rates):
@@ -69,11 +69,11 @@ class DCFValuationEngine:
             fcf_projections.append(max(0, projected))
 
         # ৪. PV of Projected FCF
-        pv_fcf_sum = sum([DCFValuationEngine.discount_value(fcf, wacc, i+1) for i, fcf in enumerate(fcf_projections)])
+        pv_fcf_sum = sum([DCFValuation.discount_value(fcf, wacc, i+1) for i, fcf in enumerate(fcf_projections)])
 
         # ৫. Terminal Value & PV
-        terminal_value = DCFValuationEngine.calculate_terminal_value(fcf_projections[-1], terminal_growth, wacc)
-        pv_terminal = DCFValuationEngine.discount_value(terminal_value, wacc, projection_years)
+        terminal_value = DCFValuation.calculate_terminal_value(fcf_projections[-1], terminal_growth, wacc)
+        pv_terminal = DCFValuation.discount_value(terminal_value, wacc, projection_years)
 
         # ৬. Enterprise Value → Equity Value → Per Share Value
         enterprise_value = pv_fcf_sum + pv_terminal
@@ -83,7 +83,7 @@ class DCFValuationEngine:
         # ৭. Margin of Safety Adjusted Value
         mos_adjusted_value = intrinsic_value_per_share * (1 - margin_of_safety)
 
-        # ৮. Investment Signal
+        # ৮. Investment Signal (BUY/HOLD/SELL)
         if current_price > 0:
             upside = ((intrinsic_value_per_share - current_price) / current_price) * 100
             if intrinsic_value_per_share > current_price * (1 + margin_of_safety):
@@ -123,6 +123,8 @@ class DCFValuationEngine:
             "net_debt": round(net_debt, 2),
             "calculation_note": "DCF based on Free Cash Flow projection with Gordon Growth Terminal Value"
         }
+# ==================== ✅ DCF ENGINE END ====================
+
 
 # ---------------------- Startup ----------------------
 @app.on_event("startup")
@@ -137,6 +139,7 @@ async def health_check():
 
 @app.head("/health")
 async def health_check_head():
+    """HEAD request for UptimeRobot"""
     return HTMLResponse(content="", status_code=200)
 
 # ---------------------- Pages ----------------------
@@ -280,10 +283,12 @@ async def home(request: Request):
     <div class="toast" id="toast"></div>
 
     <script>
+        // Register Service Worker
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('/static/sw.js');
         }
 
+        // Show Toast
         function showToast(message, type = 'success') {
             const toast = document.getElementById('toast');
             toast.textContent = message;
@@ -292,6 +297,7 @@ async def home(request: Request):
             setTimeout(() => { toast.style.display = 'none'; }, 3000);
         }
 
+        // Edit Company
         async function editCompany(companyId) {
             try {
                 const response = await fetch('/api/companies');
@@ -344,6 +350,7 @@ async def home(request: Request):
             }
         });
 
+        // Delete Company
         async function deleteCompany(companyId) {
             const companyCard = document.getElementById('company-' + companyId);
             const companyName = companyCard.querySelector('strong').textContent;
@@ -358,6 +365,7 @@ async def home(request: Request):
                         companyCard.remove();
                         showToast('Company deleted successfully!');
                         
+                        // Check if no companies left
                         const remaining = document.querySelectorAll('.company-card');
                         if (remaining.length === 0) {
                             document.getElementById('companyList').innerHTML = 
@@ -373,6 +381,7 @@ async def home(request: Request):
             }
         }
 
+        // Close modal on outside click
         document.getElementById('editModal').addEventListener('click', function(e) {
             if (e.target === this) closeEditModal();
         });
@@ -456,192 +465,44 @@ async def input_data_page(request: Request, company_id: str):
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Input Data - {company_name}</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
     <style>
-        :root {{
-            --bg-primary: #0f172a;
-            --bg-secondary: #1e293b;
-            --bg-card: #334155;
-            --text-primary: #f1f5f9;
-            --text-secondary: #94a3b8;
-            --border-color: #475569;
-            --accent: #3b82f6;
-            --success: #10b981;
-            --warning: #f59e0b;
-            --danger: #ef4444;
-        }}
-        
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        
-        body {{
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            font-family: 'Segoe UI', Arial, sans-serif;
-            min-height: 100vh;
-        }}
-        
-        .container {{
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 30px 20px;
-        }}
-        
-        .page-header {{
-            background: linear-gradient(135deg, var(--bg-secondary) 0%, #1a2332 100%);
-            padding: 25px;
-            border-radius: 15px;
-            margin-bottom: 25px;
-            border: 1px solid var(--border-color);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 15px;
-        }}
-        
-        .company-info h2 {{
-            font-size: 1.5rem;
-            margin-bottom: 5px;
-        }}
-        
-        .badge-sector {{
-            background: rgba(59, 130, 246, 0.2);
-            color: #60a5fa;
-            padding: 5px 15px;
-            border-radius: 20px;
-            font-size: 0.85rem;
-        }}
-        
-        .form-section {{
-            background: var(--bg-secondary);
-            padding: 20px;
-            border-radius: 12px;
-            margin-bottom: 18px;
-            border: 1px solid var(--border-color);
-        }}
-        
-        .section-title {{
-            font-size: 1.1rem;
-            font-weight: 600;
-            margin-bottom: 20px;
-            padding-bottom: 12px;
-            border-bottom: 2px solid var(--border-color);
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }}
-        
-        .form-label {{
-            color: var(--text-secondary);
-            font-size: 0.85rem;
-            font-weight: 500;
-            margin-bottom: 6px;
-        }}
-        
-        .form-control, .form-select {{
-            background: var(--bg-card);
-            border: 1px solid var(--border-color);
-            color: var(--text-primary);
-            padding: 10px 14px;
-            border-radius: 8px;
-            font-size: 0.9rem;
-            transition: all 0.3s;
-        }}
-        
-        .form-control:focus, .form-select:focus {{
-            background: var(--bg-card);
-            border-color: var(--accent);
-            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
-            outline: none;
-        }}
-        
-        .btn-submit {{
-            background: linear-gradient(135deg, var(--success) 0%, #059669 100%);
-            color: white;
-            padding: 14px 30px;
-            font-size: 1rem;
-            border-radius: 10px;
-            border: none;
-            width: 100%;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s;
-            margin-top: 20px;
-        }}
-        
-        .btn-submit:hover {{
-            transform: translateY(-2px);
-            box-shadow: 0 8px 25px rgba(16, 185, 129, 0.3);
-        }}
-        
-        .btn-submit:disabled {{
-            opacity: 0.6;
-            cursor: not-allowed;
-            transform: none;
-        }}
-        
-        .bank-fields {{
-            display: none;
-        }}
-        
-        .dcf-note {{
-            font-size: 0.8rem;
-            color: var(--text-secondary);
-            margin-top: 4px;
-        }}
-        
-        .toast {{
-            position: fixed;
-            bottom: 30px;
-            right: 30px;
-            padding: 14px 24px;
-            border-radius: 8px;
-            color: white;
-            z-index: 2000;
-            display: none;
-            font-weight: 500;
-        }}
-        
-        .toast-success {{ background: var(--success); }}
-        .toast-error {{ background: var(--danger); }}
-        
-        @media (max-width: 768px) {{
-            .container {{ padding: 15px; }}
-            .form-section {{ padding: 15px; }}
-        }}
+        body {{ background: #f5f6fa; padding: 20px; font-family: Arial; }}
+        .form-section {{ background: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+        .section-title {{ background: #2c3e50; color: white; padding: 10px 15px; border-radius: 5px; margin-bottom: 20px; }}
+        .bank-fields {{ display: none; }}
+        .btn-submit {{ background: #27ae60; color: white; font-weight: bold; padding: 12px 40px; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; }}
+        .btn-submit:hover {{ background: #219a52; }}
+        label {{ font-weight: 600; margin-top: 8px; }}
+        input, select {{ margin-bottom: 6px; }}
+        .dcf-note {{ font-size: 12px; color: #64748b; margin-top: 4px; }}
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="page-header">
-            <div class="company-info">
-                <h2>{company_name} ({company_ticker})</h2>
-                <span class="badge-sector">{company_sector} Sector</span>
-            </div>
-            <a href="/" class="btn btn-outline-light btn-sm">⬅ Back to Dashboard</a>
-        </div>
+        <h2 class="mb-4">📊 Financial Data Input - {company_name} ({company_ticker})</h2>
+        <span class="badge bg-info mb-3">{company_sector} Sector</span>
+        <a href="/" class="btn btn-sm btn-secondary float-end">⬅ Back to Dashboard</a>
 
         <form id="financialForm">
             <input type="hidden" id="companyId" value="{company_id_str}">
             
-            <!-- Report Information -->
             <div class="form-section">
                 <h5 class="section-title">📅 Report Information</h5>
                 <div class="row">
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Report Type *</label>
-                        <select class="form-select" id="reportType" required>
-                            <option value="annual">Annual Report</option>
-                            <option value="quarterly">Quarterly Report</option>
+                    <div class="col-md-3">
+                        <label>Report Type *</label>
+                        <select class="form-control" id="reportType" required>
+                            <option value="annual">Annual</option>
+                            <option value="quarterly">Quarterly</option>
                         </select>
                     </div>
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Year *</label>
+                    <div class="col-md-3">
+                        <label>Year *</label>
                         <input type="number" class="form-control" id="year" placeholder="2024" required>
                     </div>
-                    <div class="col-md-4 mb-3" id="quarterDiv" style="display:none;">
-                        <label class="form-label">Quarter</label>
-                        <select class="form-select" id="quarter">
+                    <div class="col-md-3" id="quarterDiv" style="display:none;">
+                        <label>Quarter</label>
+                        <select class="form-control" id="quarter">
                             <option value="1">Q1</option>
                             <option value="2">Q2</option>
                             <option value="3">Q3</option>
@@ -651,197 +512,114 @@ async def input_data_page(request: Request, company_id: str):
                 </div>
             </div>
 
-            <!-- Balance Sheet -->
             <div class="form-section">
-                <h5 class="section-title">📋 Balance Sheet (Millions BDT)</h5>
+                <h5 class="section-title">📋 Balance Sheet</h5>
                 <div class="row">
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Total Assets</label>
-                        <input type="number" step="0.01" class="form-control" id="totalAssets" placeholder="0.00">
-                    </div>
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Total Liabilities</label>
-                        <input type="number" step="0.01" class="form-control" id="totalLiabilities" placeholder="0.00">
-                    </div>
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Shareholders' Equity</label>
-                        <input type="number" step="0.01" class="form-control" id="shareholdersEquity" placeholder="0.00">
-                    </div>
+                    <div class="col-md-4"><label>Total Assets</label><input type="number" step="0.01" class="form-control" id="totalAssets" placeholder="0.00"></div>
+                    <div class="col-md-4"><label>Total Liabilities</label><input type="number" step="0.01" class="form-control" id="totalLiabilities" placeholder="0.00"></div>
+                    <div class="col-md-4"><label>Shareholders' Equity</label><input type="number" step="0.01" class="form-control" id="shareholdersEquity" placeholder="0.00"></div>
                 </div>
-                <div class="row">
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Total Debt</label>
-                        <input type="number" step="0.01" class="form-control" id="totalDebt" placeholder="0.00">
-                    </div>
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Cash & Equivalents</label>
-                        <input type="number" step="0.01" class="form-control" id="cash" placeholder="0.00">
-                    </div>
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Current Assets</label>
-                        <input type="number" step="0.01" class="form-control" id="currentAssets" placeholder="0.00">
-                    </div>
+                <div class="row mt-3">
+                    <div class="col-md-4"><label>Total Debt</label><input type="number" step="0.01" class="form-control" id="totalDebt" placeholder="0.00"></div>
+                    <div class="col-md-4"><label>Cash & Equivalents</label><input type="number" step="0.01" class="form-control" id="cash" placeholder="0.00"></div>
+                    <div class="col-md-4"><label>Current Assets</label><input type="number" step="0.01" class="form-control" id="currentAssets" placeholder="0.00"></div>
                 </div>
-                <div class="row">
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Current Liabilities</label>
-                        <input type="number" step="0.01" class="form-control" id="currentLiabilities" placeholder="0.00">
-                    </div>
+                <div class="row mt-3">
+                    <div class="col-md-4"><label>Current Liabilities</label><input type="number" step="0.01" class="form-control" id="currentLiabilities" placeholder="0.00"></div>
                 </div>
             </div>
 
-            <!-- Income Statement -->
             <div class="form-section">
-                <h5 class="section-title">📈 Income Statement (Millions BDT)</h5>
+                <h5 class="section-title">📈 Income Statement</h5>
                 <div class="row">
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Revenue *</label>
-                        <input type="number" step="0.01" class="form-control" id="revenue" placeholder="0.00">
-                    </div>
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Gross Profit</label>
-                        <input type="number" step="0.01" class="form-control" id="grossProfit" placeholder="0.00">
-                    </div>
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Operating Income</label>
-                        <input type="number" step="0.01" class="form-control" id="operatingIncome" placeholder="0.00">
-                    </div>
+                    <div class="col-md-4"><label>Revenue</label><input type="number" step="0.01" class="form-control" id="revenue" placeholder="0.00"></div>
+                    <div class="col-md-4"><label>Gross Profit</label><input type="number" step="0.01" class="form-control" id="grossProfit" placeholder="0.00"></div>
+                    <div class="col-md-4"><label>Operating Income</label><input type="number" step="0.01" class="form-control" id="operatingIncome" placeholder="0.00"></div>
                 </div>
-                <div class="row">
-                    <div class="col-md-3 mb-3">
-                        <label class="form-label">EBIT</label>
-                        <input type="number" step="0.01" class="form-control" id="ebit" placeholder="0.00">
-                    </div>
-                    <div class="col-md-3 mb-3">
-                        <label class="form-label">EBITDA</label>
-                        <input type="number" step="0.01" class="form-control" id="ebitda" placeholder="0.00">
-                    </div>
-                    <div class="col-md-3 mb-3">
-                        <label class="form-label">Interest Expense</label>
-                        <input type="number" step="0.01" class="form-control" id="interestExpense" placeholder="0.00">
-                    </div>
-                    <div class="col-md-3 mb-3">
-                        <label class="form-label">Net Income</label>
-                        <input type="number" step="0.01" class="form-control" id="netIncome" placeholder="0.00">
-                    </div>
+                <div class="row mt-3">
+                    <div class="col-md-3"><label>EBIT</label><input type="number" step="0.01" class="form-control" id="ebit" placeholder="0.00"></div>
+                    <div class="col-md-3"><label>EBITDA</label><input type="number" step="0.01" class="form-control" id="ebitda" placeholder="0.00"></div>
+                    <div class="col-md-3"><label>Interest Expense</label><input type="number" step="0.01" class="form-control" id="interestExpense" placeholder="0.00"></div>
+                    <div class="col-md-3"><label>Net Income</label><input type="number" step="0.01" class="form-control" id="netIncome" placeholder="0.00"></div>
                 </div>
             </div>
 
-            <!-- Cash Flow -->
             <div class="form-section">
-                <h5 class="section-title">💵 Cash Flow (Millions BDT)</h5>
+                <h5 class="section-title">💵 Cash Flow</h5>
                 <div class="row">
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Operating Cash Flow</label>
-                        <input type="number" step="0.01" class="form-control" id="ocf" placeholder="0.00">
-                    </div>
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">CAPEX</label>
-                        <input type="number" step="0.01" class="form-control" id="capex" placeholder="0.00">
-                    </div>
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Free Cash Flow</label>
-                        <input type="number" step="0.01" class="form-control" id="fcf" placeholder="0.00">
-                        <small class="dcf-note">Auto-calculated if OCF & CAPEX provided</small>
-                    </div>
+                    <div class="col-md-4"><label>Operating Cash Flow</label><input type="number" step="0.01" class="form-control" id="ocf" placeholder="0.00"></div>
+                    <div class="col-md-4"><label>CAPEX</label><input type="number" step="0.01" class="form-control" id="capex" placeholder="0.00"></div>
+                    <div class="col-md-4"><label>Free Cash Flow</label><input type="number" step="0.01" class="form-control" id="fcf" placeholder="0.00"></div>
                 </div>
             </div>
 
-            <!-- Per Share Data -->
             <div class="form-section">
                 <h5 class="section-title">📊 Per Share Data</h5>
                 <div class="row">
-                    <div class="col-md-3 mb-3">
-                        <label class="form-label">EPS</label>
-                        <input type="number" step="0.01" class="form-control" id="eps" placeholder="0.00">
-                    </div>
-                    <div class="col-md-3 mb-3">
-                        <label class="form-label">DPS</label>
-                        <input type="number" step="0.01" class="form-control" id="dps" placeholder="0.00">
-                    </div>
-                    <div class="col-md-3 mb-3">
-                        <label class="form-label">Shares Outstanding (M)</label>
-                        <input type="number" step="0.01" class="form-control" id="sharesOut" placeholder="0.00">
-                    </div>
-                    <div class="col-md-3 mb-3">
-                        <label class="form-label">Current Stock Price (BDT)</label>
-                        <input type="number" step="0.01" class="form-control" id="currentPrice" placeholder="0.00">
-                    </div>
+                    <div class="col-md-3"><label>EPS</label><input type="number" step="0.01" class="form-control" id="eps" placeholder="0.00"></div>
+                    <div class="col-md-3"><label>DPS</label><input type="number" step="0.01" class="form-control" id="dps" placeholder="0.00"></div>
+                    <div class="col-md-3"><label>Shares Outstanding (M)</label><input type="number" step="0.01" class="form-control" id="sharesOut" placeholder="0.00"></div>
+                    <div class="col-md-3"><label>Current Stock Price</label><input type="number" step="0.01" class="form-control" id="currentPrice" placeholder="0.00"></div>
                 </div>
             </div>
 
-            <!-- DCF Valuation Settings -->
+            <!-- 🆕 DCF Valuation Settings Section -->
             <div class="form-section" id="dcfSection">
-                <h5 class="section-title">📊 DCF Valuation Settings <small style="font-weight:normal;color:#94a3b8;">(Optional)</small></h5>
-                <p class="dcf-note mb-3">💡 DCF uses FCF + Revenue data. Adjust assumptions for custom valuation.</p>
+                <h5 class="section-title">📊 DCF Valuation Settings <small style="font-weight:normal;color:#64748b;">(Optional - Auto-calculated if skipped)</small></h5>
+                <p class="dcf-note">💡 DCF uses your FCF + Revenue data. Adjust assumptions below for custom valuation.</p>
                 
                 <div class="row mb-3">
-                    <div class="col-md-3 mb-3">
-                        <label class="form-label">Projection Years</label>
-                        <select class="form-select" id="dcfYears">
+                    <div class="col-md-3">
+                        <label>Projection Years</label>
+                        <select class="form-control" id="dcfYears">
                             <option value="5">5 Years</option>
                             <option value="7">7 Years</option>
                             <option value="10">10 Years</option>
                         </select>
                     </div>
-                    <div class="col-md-3 mb-3">
-                        <label class="form-label">WACC (%)</label>
+                    <div class="col-md-3">
+                        <label>WACC (%)</label>
                         <input type="number" step="0.1" class="form-control" id="dcfWacc" value="15.0" min="5" max="30">
-                        <small class="dcf-note">Discount rate (Bangladesh: 12-18%)</small>
+                        <small class="dcf-note">Discount rate for Bangladesh market</small>
                     </div>
-                    <div class="col-md-3 mb-3">
-                        <label class="form-label">Terminal Growth (%)</label>
+                    <div class="col-md-3">
+                        <label>Terminal Growth (%)</label>
                         <input type="number" step="0.1" class="form-control" id="dcfTermGrowth" value="3.0" min="0" max="6">
-                        <small class="dcf-note">Long-term GDP growth</small>
+                        <small class="dcf-note">Long-term GDP growth assumption</small>
                     </div>
-                    <div class="col-md-3 mb-3">
-                        <label class="form-label">Margin of Safety (%)</label>
+                    <div class="col-md-3">
+                        <label>Margin of Safety (%)</label>
                         <input type="number" step="1" class="form-control" id="dcfMos" value="20" min="0" max="50">
                         <small class="dcf-note">Buffer for uncertainty</small>
                     </div>
                 </div>
                 
+                <!-- Growth Rates Input -->
                 <div class="mb-3">
-                    <label class="form-label">Annual Growth Rates (%) for FCF Projection</label>
-                    <div id="growthRatesContainer" class="d-flex gap-2 flex-wrap"></div>
-                    <small class="dcf-note">Year-by-year growth assumption</small>
+                    <label>Annual Growth Rates (%) for FCF Projection</label>
+                    <div id="growthRatesContainer" class="d-flex gap-2 flex-wrap">
+                        <!-- JavaScript will populate this -->
+                    </div>
+                    <small class="dcf-note">Year-by-year growth assumption for Free Cash Flow</small>
                 </div>
             </div>
 
-            <!-- Bank Specific Fields -->
             <div class="form-section bank-fields" id="bankFields">
                 <h5 class="section-title">🏦 Bank Specific</h5>
                 <div class="row">
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Total Deposits</label>
-                        <input type="number" step="0.01" class="form-control" id="totalDeposits" placeholder="0.00">
-                    </div>
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Total Loans</label>
-                        <input type="number" step="0.01" class="form-control" id="totalLoans" placeholder="0.00">
-                    </div>
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">Net Interest Income</label>
-                        <input type="number" step="0.01" class="form-control" id="nii" placeholder="0.00">
-                    </div>
+                    <div class="col-md-4"><label>Total Deposits</label><input type="number" step="0.01" class="form-control" id="totalDeposits" placeholder="0.00"></div>
+                    <div class="col-md-4"><label>Total Loans</label><input type="number" step="0.01" class="form-control" id="totalLoans" placeholder="0.00"></div>
+                    <div class="col-md-4"><label>Net Interest Income</label><input type="number" step="0.01" class="form-control" id="nii" placeholder="0.00"></div>
                 </div>
-                <div class="row">
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">NPL Ratio (%)</label>
-                        <input type="number" step="0.01" class="form-control" id="nplRatio" placeholder="0.00">
-                    </div>
-                    <div class="col-md-4 mb-3">
-                        <label class="form-label">CAR (%)</label>
-                        <input type="number" step="0.01" class="form-control" id="carRatio" placeholder="0.00">
-                    </div>
+                <div class="row mt-3">
+                    <div class="col-md-4"><label>NPL Ratio (%)</label><input type="number" step="0.01" class="form-control" id="nplRatio" placeholder="0.00"></div>
+                    <div class="col-md-4"><label>CAR (%)</label><input type="number" step="0.01" class="form-control" id="carRatio" placeholder="0.00"></div>
                 </div>
             </div>
 
-            <button type="submit" class="btn-submit">📊 Analyze & Save</button>
+            <button type="submit" class="btn-submit btn-lg mt-3">📊 Analyze & Save</button>
         </form>
     </div>
-
-    <div class="toast" id="toast"></div>
 
     <script>
         // Report Type Toggle
@@ -855,7 +633,7 @@ async def input_data_page(request: Request, company_id: str):
             document.getElementById('bankFields').style.display = 'block';
         }}
 
-        // DCF: Dynamic Growth Rate Inputs
+        // 🆕 DCF: Dynamic Growth Rate Inputs
         function renderGrowthInputs(years = 5) {{
             const container = document.getElementById('growthRatesContainer');
             container.innerHTML = '';
@@ -875,36 +653,14 @@ async def input_data_page(request: Request, company_id: str):
             renderGrowthInputs(parseInt(e.target.value));
         }});
 
-        // Auto-calculate FCF
-        document.getElementById('ocf').addEventListener('input', autoCalcFCF);
-        document.getElementById('capex').addEventListener('input', autoCalcFCF);
-        
-        function autoCalcFCF() {{
-            const ocf = parseFloat(document.getElementById('ocf').value) || 0;
-            const capex = parseFloat(document.getElementById('capex').value) || 0;
-            const fcfField = document.getElementById('fcf');
-            if (ocf > 0 && !fcfField.value) {{
-                fcfField.value = (ocf - capex).toFixed(2);
-                fcfField.style.background = '#1e3a2f';
-            }}
-        }}
-
-        // Toast Notification
-        function showToast(message, type = 'success') {{
-            const toast = document.getElementById('toast');
-            toast.textContent = message;
-            toast.className = 'toast toast-' + type;
-            toast.style.display = 'block';
-            setTimeout(() => {{ toast.style.display = 'none'; }}, 3000);
-        }}
-
         // Form Submit Handler
         document.getElementById('financialForm').addEventListener('submit', async function(e) {{
             e.preventDefault();
             var btn = this.querySelector('button[type="submit"]');
             btn.disabled = true;
-            btn.innerHTML = '⏳ Analyzing... Please wait';
+            btn.innerHTML = '⏳ Analyzing...';
             
+            // Collect basic financial data
             var data = {{
                 company_id: document.getElementById('companyId').value,
                 report_type: document.getElementById('reportType').value,
@@ -936,6 +692,7 @@ async def input_data_page(request: Request, company_id: str):
                 npl_ratio: parseFloat(document.getElementById('nplRatio')?.value) || null,
                 car_ratio: parseFloat(document.getElementById('carRatio')?.value) || null,
                 net_interest_income: parseFloat(document.getElementById('nii')?.value) || null,
+                // 🆕 DCF Parameters
                 dcf_params: {{
                     projection_years: parseInt(document.getElementById('dcfYears').value),
                     growth_rates: Array.from(document.querySelectorAll('.growth-rate')).map(inp => parseFloat(inp.value)/100),
@@ -953,19 +710,275 @@ async def input_data_page(request: Request, company_id: str):
                 }});
                 var result = await response.json();
                 if (response.ok) {{
-                    showToast('✅ Analysis completed! Redirecting...', 'success');
-                    setTimeout(() => {{
-                        window.location.href = '/result/' + result.financial_id;
-                    }}, 1000);
+                    window.location.href = '/result/' + result.financial_id;
                 }} else {{
-                    showToast('❌ Error: ' + (result.detail || 'Something went wrong'), 'error');
+                    alert('Error: ' + (result.detail || 'Something went wrong'));
                     btn.disabled = false;
                     btn.innerHTML = '📊 Analyze & Save';
                 }}
             }} catch (error) {{
-                showToast('❌ Error: ' + error.message, 'error');
+                alert('Error: ' + error.message);
                 btn.disabled = false;
                 btn.innerHTML = '📊 Analyze & Save';
+            }}
+        }});
+    </script>
+</body>
+</html>"""
+
+    return HTMLResponse(content=html)
+
+@app.get("/edit-data/{financial_id}", response_class=HTMLResponse)
+async def edit_data_page(request: Request, financial_id: str):
+    """Edit existing financial data"""
+    try:
+        financial_data = await db.financial_data.find_one({"_id": ObjectId(financial_id)})
+        if not financial_data:
+            raise HTTPException(404, "Financial data not found")
+        
+        company = await db.companies.find_one({"_id": financial_data["company_id"]})
+        if not company:
+            raise HTTPException(404, "Company not found")
+    except:
+        raise HTTPException(400, "Invalid ID format")
+
+    company_name = company["name"]
+    company_ticker = company["ticker"]
+    company_sector = company.get("sector", "")
+    financial_id_str = str(financial_data["_id"])
+    company_id_str = str(company["_id"])
+
+    def get_val(key, default=""):
+        val = financial_data.get(key)
+        return val if val is not None and val != 0 else default
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Edit Data - {company_name}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+    <style>
+        body {{ background: #f5f6fa; padding: 20px; font-family: Arial; }}
+        .form-section {{ background: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+        .section-title {{ background: #2c3e50; color: white; padding: 10px 15px; border-radius: 5px; margin-bottom: 20px; }}
+        .bank-fields {{ display: none; }}
+        .btn-submit {{ background: #f59e0b; color: white; font-weight: bold; padding: 12px 40px; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; }}
+        .btn-submit:hover {{ background: #d97706; }}
+        .btn-delete {{ background: #ef4444; color: white; padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; }}
+        .btn-delete:hover {{ background: #dc2626; }}
+        label {{ font-weight: 600; margin-top: 8px; }}
+        input, select {{ margin-bottom: 6px; }}
+        .badge-edit {{ background: #f59e0b; color: white; padding: 5px 12px; border-radius: 12px; font-size: 12px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2 class="mb-4">✏️ Edit Financial Data - {company_name} ({company_ticker})</h2>
+        <span class="badge bg-info mb-3">{company_sector} Sector</span>
+        <span class="badge-edit ms-2">Edit Mode</span>
+        <div class="float-end">
+            <button class="btn-delete" onclick="deleteRecord()"><i class="bi bi-trash"></i> Delete Record</button>
+            <a href="/analysis/{company_id_str}" class="btn btn-sm btn-info ms-2">📊 View Analysis</a>
+            <a href="/" class="btn btn-sm btn-secondary ms-2">⬅ Back</a>
+        </div>
+
+        <form id="editForm">
+            <input type="hidden" id="financialId" value="{financial_id_str}">
+            <input type="hidden" id="companyId" value="{company_id_str}">
+            
+            <div class="form-section">
+                <h5 class="section-title">📅 Report Information</h5>
+                <div class="row">
+                    <div class="col-md-3">
+                        <label>Report Type</label>
+                        <select class="form-control" id="reportType">
+                            <option value="annual" {'selected' if financial_data.get('report_type') == 'annual' else ''}>Annual</option>
+                            <option value="quarterly" {'selected' if financial_data.get('report_type') == 'quarterly' else ''}>Quarterly</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label>Year</label>
+                        <input type="number" class="form-control" id="year" value="{get_val('year', 2024)}">
+                    </div>
+                    <div class="col-md-3" id="quarterDiv" style="display:{'block' if financial_data.get('report_type') == 'quarterly' else 'none'};">
+                        <label>Quarter</label>
+                        <select class="form-control" id="quarter">
+                            <option value="1" {'selected' if get_val('quarter') == 1 else ''}>Q1</option>
+                            <option value="2" {'selected' if get_val('quarter') == 2 else ''}>Q2</option>
+                            <option value="3" {'selected' if get_val('quarter') == 3 else ''}>Q3</option>
+                            <option value="4" {'selected' if get_val('quarter') == 4 else ''}>Q4</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-section">
+                <h5 class="section-title">📋 Balance Sheet</h5>
+                <div class="row">
+                    <div class="col-md-4"><label>Total Assets</label><input type="number" step="0.01" class="form-control" id="totalAssets" value="{get_val('total_assets')}"></div>
+                    <div class="col-md-4"><label>Total Liabilities</label><input type="number" step="0.01" class="form-control" id="totalLiabilities" value="{get_val('total_liabilities')}"></div>
+                    <div class="col-md-4"><label>Shareholders' Equity</label><input type="number" step="0.01" class="form-control" id="shareholdersEquity" value="{get_val('shareholders_equity')}"></div>
+                </div>
+                <div class="row mt-3">
+                    <div class="col-md-4"><label>Total Debt</label><input type="number" step="0.01" class="form-control" id="totalDebt" value="{get_val('total_debt')}"></div>
+                    <div class="col-md-4"><label>Cash & Equivalents</label><input type="number" step="0.01" class="form-control" id="cash" value="{get_val('cash_and_equivalents')}"></div>
+                    <div class="col-md-4"><label>Current Assets</label><input type="number" step="0.01" class="form-control" id="currentAssets" value="{get_val('current_assets')}"></div>
+                </div>
+                <div class="row mt-3">
+                    <div class="col-md-4"><label>Current Liabilities</label><input type="number" step="0.01" class="form-control" id="currentLiabilities" value="{get_val('current_liabilities')}"></div>
+                </div>
+            </div>
+
+            <div class="form-section">
+                <h5 class="section-title">📈 Income Statement</h5>
+                <div class="row">
+                    <div class="col-md-4"><label>Revenue</label><input type="number" step="0.01" class="form-control" id="revenue" value="{get_val('revenue')}"></div>
+                    <div class="col-md-4"><label>Gross Profit</label><input type="number" step="0.01" class="form-control" id="grossProfit" value="{get_val('gross_profit')}"></div>
+                    <div class="col-md-4"><label>Operating Income</label><input type="number" step="0.01" class="form-control" id="operatingIncome" value="{get_val('operating_income')}"></div>
+                </div>
+                <div class="row mt-3">
+                    <div class="col-md-3"><label>EBIT</label><input type="number" step="0.01" class="form-control" id="ebit" value="{get_val('ebit')}"></div>
+                    <div class="col-md-3"><label>EBITDA</label><input type="number" step="0.01" class="form-control" id="ebitda" value="{get_val('ebitda')}"></div>
+                    <div class="col-md-3"><label>Interest Expense</label><input type="number" step="0.01" class="form-control" id="interestExpense" value="{get_val('interest_expense')}"></div>
+                    <div class="col-md-3"><label>Net Income</label><input type="number" step="0.01" class="form-control" id="netIncome" value="{get_val('net_income')}"></div>
+                </div>
+            </div>
+
+            <div class="form-section">
+                <h5 class="section-title">💵 Cash Flow</h5>
+                <div class="row">
+                    <div class="col-md-4"><label>Operating Cash Flow</label><input type="number" step="0.01" class="form-control" id="ocf" value="{get_val('operating_cash_flow')}"></div>
+                    <div class="col-md-4"><label>CAPEX</label><input type="number" step="0.01" class="form-control" id="capex" value="{get_val('capex')}"></div>
+                    <div class="col-md-4"><label>Free Cash Flow</label><input type="number" step="0.01" class="form-control" id="fcf" value="{get_val('free_cash_flow')}"></div>
+                </div>
+            </div>
+
+            <div class="form-section">
+                <h5 class="section-title">📊 Per Share Data</h5>
+                <div class="row">
+                    <div class="col-md-3"><label>EPS</label><input type="number" step="0.01" class="form-control" id="eps" value="{get_val('eps')}"></div>
+                    <div class="col-md-3"><label>DPS</label><input type="number" step="0.01" class="form-control" id="dps" value="{get_val('dps')}"></div>
+                    <div class="col-md-3"><label>Shares Outstanding (M)</label><input type="number" step="0.01" class="form-control" id="sharesOut" value="{get_val('shares_outstanding')}"></div>
+                    <div class="col-md-3"><label>Current Stock Price</label><input type="number" step="0.01" class="form-control" id="currentPrice" value="{get_val('current_price')}"></div>
+                </div>
+            </div>
+
+            <div class="form-section bank-fields" id="bankFields">
+                <h5 class="section-title">🏦 Bank Specific</h5>
+                <div class="row">
+                    <div class="col-md-4"><label>Total Deposits</label><input type="number" step="0.01" class="form-control" id="totalDeposits" value="{get_val('total_deposits')}"></div>
+                    <div class="col-md-4"><label>Total Loans</label><input type="number" step="0.01" class="form-control" id="totalLoans" value="{get_val('total_loans')}"></div>
+                    <div class="col-md-4"><label>Net Interest Income</label><input type="number" step="0.01" class="form-control" id="nii" value="{get_val('net_interest_income')}"></div>
+                </div>
+                <div class="row mt-3">
+                    <div class="col-md-4"><label>NPL Ratio (%)</label><input type="number" step="0.01" class="form-control" id="nplRatio" value="{get_val('npl_ratio')}"></div>
+                    <div class="col-md-4"><label>CAR (%)</label><input type="number" step="0.01" class="form-control" id="carRatio" value="{get_val('car_ratio')}"></div>
+                </div>
+            </div>
+
+            <button type="submit" class="btn-submit btn-lg mt-3">💾 Update & Re-analyze</button>
+        </form>
+    </div>
+
+    <script>
+        // Report Type Toggle
+        document.getElementById('reportType').addEventListener('change', function() {{
+            document.getElementById('quarterDiv').style.display = this.value === 'quarterly' ? 'block' : 'none';
+        }});
+        
+        // Bank Fields Toggle
+        var sector = "{company_sector}";
+        if (sector === "Bank") {{
+            document.getElementById('bankFields').style.display = 'block';
+        }}
+
+        // Delete Record
+        async function deleteRecord() {{
+            if (confirm('Are you sure you want to delete this financial record?\\n\\nThis action cannot be undone!')) {{
+                const financialId = document.getElementById('financialId').value;
+                const companyId = document.getElementById('companyId').value;
+                
+                try {{
+                    const response = await fetch('/api/financial-data/' + financialId, {{
+                        method: 'DELETE'
+                    }});
+                    
+                    if (response.ok) {{
+                        alert('Record deleted successfully!');
+                        window.location.href = '/analysis/' + companyId;
+                    }} else {{
+                        const err = await response.json();
+                        alert('Error: ' + (err.detail || 'Delete failed'));
+                    }}
+                }} catch (error) {{
+                    alert('Error deleting record: ' + error.message);
+                }}
+            }}
+        }}
+
+        // Form Submit Handler
+        document.getElementById('editForm').addEventListener('submit', async function(e) {{
+            e.preventDefault();
+            var btn = this.querySelector('button[type="submit"]');
+            btn.disabled = true;
+            btn.innerHTML = '⏳ Updating...';
+            
+            const financialId = document.getElementById('financialId').value;
+            
+            var data = {{
+                report_type: document.getElementById('reportType').value,
+                year: parseInt(document.getElementById('year').value),
+                quarter: document.getElementById('reportType').value === 'quarterly' ? parseInt(document.getElementById('quarter').value) : null,
+                total_assets: parseFloat(document.getElementById('totalAssets').value) || 0,
+                total_liabilities: parseFloat(document.getElementById('totalLiabilities').value) || 0,
+                shareholders_equity: parseFloat(document.getElementById('shareholdersEquity').value) || 0,
+                total_debt: parseFloat(document.getElementById('totalDebt').value) || 0,
+                cash_and_equivalents: parseFloat(document.getElementById('cash').value) || 0,
+                current_assets: parseFloat(document.getElementById('currentAssets').value) || 0,
+                current_liabilities: parseFloat(document.getElementById('currentLiabilities').value) || 0,
+                revenue: parseFloat(document.getElementById('revenue').value) || 0,
+                gross_profit: parseFloat(document.getElementById('grossProfit').value) || 0,
+                operating_income: parseFloat(document.getElementById('operatingIncome').value) || 0,
+                ebit: parseFloat(document.getElementById('ebit').value) || 0,
+                ebitda: parseFloat(document.getElementById('ebitda').value) || 0,
+                interest_expense: parseFloat(document.getElementById('interestExpense').value) || 0,
+                net_income: parseFloat(document.getElementById('netIncome').value) || 0,
+                operating_cash_flow: parseFloat(document.getElementById('ocf').value) || 0,
+                capex: parseFloat(document.getElementById('capex').value) || 0,
+                free_cash_flow: parseFloat(document.getElementById('fcf').value) || 0,
+                eps: parseFloat(document.getElementById('eps').value) || 0,
+                dps: parseFloat(document.getElementById('dps').value) || 0,
+                shares_outstanding: parseFloat(document.getElementById('sharesOut').value) || 0,
+                current_price: parseFloat(document.getElementById('currentPrice').value) || 0,
+                total_deposits: parseFloat(document.getElementById('totalDeposits')?.value) || null,
+                total_loans: parseFloat(document.getElementById('totalLoans')?.value) || null,
+                npl_ratio: parseFloat(document.getElementById('nplRatio')?.value) || null,
+                car_ratio: parseFloat(document.getElementById('carRatio')?.value) || null,
+                net_interest_income: parseFloat(document.getElementById('nii')?.value) || null
+            }};
+            
+            try {{
+                var response = await fetch('/api/financial-data/' + financialId, {{
+                    method: 'PUT',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify(data)
+                }});
+                var result = await response.json();
+                if (response.ok) {{
+                    alert('Updated & Re-analyzed successfully!');
+                    window.location.href = '/result/' + financialId;
+                }} else {{
+                    alert('Error: ' + (result.detail || 'Update failed'));
+                    btn.disabled = false;
+                    btn.innerHTML = '💾 Update & Re-analyze';
+                }}
+            }} catch (error) {{
+                alert('Error: ' + error.message);
+                btn.disabled = false;
+                btn.innerHTML = '💾 Update & Re-analyze';
             }}
         }});
     </script>
@@ -1020,14 +1033,17 @@ async def view_analysis(request: Request, company_id: str):
                 dcf = analysis["dcf_valuation"]
                 dcf_html = f"""
                 <div style="margin-top:15px;padding:12px;background:rgba(6,182,212,0.1);border-radius:8px;border-left:4px solid #06b6d4;">
-                    <strong>📊 DCF Value:</strong> {dcf.get('intrinsic_value_per_share', 'N/A')} BDT 
+                    <strong>📊 DCF Value:</strong> {dcf.get('intrinsic_value_per_share', 'N/A')} টাকা 
                     <span style="background:{dcf.get('signal_color','#64748b')};color:white;padding:2px 10px;border-radius:12px;font-size:12px;margin-left:8px;">{dcf.get('signal','N/A')}</span>
                     {f"<span style='color:#10b981;margin-left:8px;'>↑ {dcf.get('upside_percent',0)}% upside</span>" if dcf.get('upside_percent') and dcf.get('upside_percent') > 0 else ""}
                 </div>"""
 
             analyses_html += f"""
             <div style="background:#1e293b;padding:20px;border-radius:15px;margin-bottom:20px;">
-                <h4>{rtype} - {year}{quarter}</h4>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;">
+                    <h4>{rtype} - {year}{quarter}</h4>
+                    <a href="/edit-data/{fin_id}" class="btn btn-warning btn-sm">✏️ Edit</a>
+                </div>
                 <div style="text-align:center;margin:25px 0;">
                     <h2 style="color:{color};font-size:3rem;">{score}/100</h2>
                     <h4 style="color:{color};">{color_name}</h4>
@@ -1040,7 +1056,7 @@ async def view_analysis(request: Request, company_id: str):
             </div>"""
 
     if not analyses_html:
-        analyses_html = f'<div style="text-align:center;padding:40px;"><h4>No analysis data found</h4><a href="/input-data/{company_id_str}" style="color:#10b981;">📝 Add Financial Data</a></div>'
+        analyses_html = '<div style="text-align:center;padding:40px;"><h4>No analysis data found</h4><a href="/input-data/' + company_id_str + '" style="color:#10b981;">📝 Add Financial Data</a></div>'
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -1101,15 +1117,15 @@ async def view_result(request: Request, financial_id: str):
             <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:15px;text-align:center;margin-bottom:25px;">
                 <div style="background:#334155;padding:15px;border-radius:10px;">
                     <div style="color:#94a3b8;font-size:13px;">Current Price</div>
-                    <div style="font-size:1.3rem;font-weight:bold;">{dcf.get('current_price',0)} BDT</div>
+                    <div style="font-size:1.3rem;font-weight:bold;">{dcf.get('current_price',0)} টাকা</div>
                 </div>
                 <div style="background:#334155;padding:15px;border-radius:10px;">
                     <div style="color:#94a3b8;font-size:13px;">Intrinsic Value</div>
-                    <div style="font-size:1.3rem;font-weight:bold;color:#10b981;">{dcf.get('intrinsic_value_per_share',0)} BDT</div>
+                    <div style="font-size:1.3rem;font-weight:bold;color:#10b981;">{dcf.get('intrinsic_value_per_share',0)} টাকা</div>
                 </div>
                 <div style="background:#334155;padding:15px;border-radius:10px;">
                     <div style="color:#94a3b8;font-size:13px;">MoS Value</div>
-                    <div style="font-size:1.3rem;font-weight:bold;color:#f59e0b;">{dcf.get('mos_adjusted_value',0)} BDT</div>
+                    <div style="font-size:1.3rem;font-weight:bold;color:#f59e0b;">{dcf.get('mos_adjusted_value',0)} টাকা</div>
                 </div>
                 <div style="background:#334155;padding:15px;border-radius:10px;">
                     <div style="color:#94a3b8;font-size:13px;">Upside</div>
@@ -1122,6 +1138,36 @@ async def view_result(request: Request, financial_id: str):
                     {dcf.get('signal','N/A')} SIGNAL
                 </span>
             </div>
+            
+            <details style="margin-top:20px;">
+                <summary style="cursor:pointer;color:#94a3b8;font-weight:500;">🔍 DCF Calculation Details</summary>
+                <div style="margin-top:15px;background:#334155;padding:15px;border-radius:8px;">
+                    <table style="width:100%;font-size:14px;">
+                        <tr><td style="padding:6px 0;">WACC</td><td style="padding:6px 0;text-align:right;">{dcf.get('inputs',{}).get('wacc_percent','N/A')}%</td></tr>
+                        <tr><td style="padding:6px 0;">Terminal Growth</td><td style="padding:6px 0;text-align:right;">{dcf.get('inputs',{}).get('terminal_growth_percent','N/A')}%</td></tr>
+                        <tr><td style="padding:6px 0;">Projection Period</td><td style="padding:6px 0;text-align:right;">{dcf.get('inputs',{}).get('projection_years','N/A')} Years</td></tr>
+                        <tr><td style="padding:6px 0;">Margin of Safety</td><td style="padding:6px 0;text-align:right;">{dcf.get('inputs',{}).get('margin_of_safety_percent','N/A')}%</td></tr>
+                        <tr><td style="padding:6px 0;">PV of FCF</td><td style="padding:6px 0;text-align:right;">{dcf.get('pv_fcf_sum','N/A')} M</td></tr>
+                        <tr><td style="padding:6px 0;">PV of Terminal</td><td style="padding:6px 0;text-align:right;">{dcf.get('pv_terminal','N/A')} M</td></tr>
+                        <tr><td style="padding:6px 0;">Enterprise Value</td><td style="padding:6px 0;text-align:right;">{dcf.get('enterprise_value','N/A')} M</td></tr>
+                        <tr><td style="padding:6px 0;">Net Debt</td><td style="padding:6px 0;text-align:right;">{dcf.get('net_debt','N/A')} M</td></tr>
+                    </table>
+                </div>
+            </details>
+            
+            <details style="margin-top:15px;">
+                <summary style="cursor:pointer;color:#94a3b8;font-weight:500;">📈 FCF Projections</summary>
+                <div style="margin-top:10px;background:#334155;padding:10px;border-radius:8px;">
+                    <table style="width:100%;font-size:13px;">
+                        <thead><tr style="border-bottom:1px solid #475569;"><th style="padding:8px;text-align:left;">Year</th><th style="padding:8px;text-align:right;">Projected FCF</th></tr></thead>
+                        <tbody>{fcf_rows}</tbody>
+                    </table>
+                </div>
+            </details>
+            
+            <p style="margin-top:15px;font-size:12px;color:#94a3b8;text-align:center;">
+                💡 {dcf.get('calculation_note','')}
+            </p>
         </div>"""
 
     html = f"""<!DOCTYPE html>
@@ -1132,7 +1178,10 @@ async def view_result(request: Request, financial_id: str):
 </head>
 <body style="background:#0f172a;color:white;padding:30px;font-family:Arial;">
     <div style="max-width:900px;margin:0 auto;background:#1e293b;padding:30px;border-radius:15px;">
-        <h3 style="text-align:center;">{name} ({ticker})</h3>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+            <h3 style="text-align:center;flex:1;">{name} ({ticker})</h3>
+            <a href="/edit-data/{financial_id}" class="btn btn-warning btn-sm">✏️ Edit Data</a>
+        </div>
         <p style="text-align:center;color:#94a3b8;">{rtype} - {year}{quarter}</p>
         <div style="text-align:center;margin:25px 0;">
             <div style="width:150px;height:150px;border-radius:50%;background:{color};display:flex;align-items:center;justify-content:center;margin:0 auto;font-size:2.5rem;font-weight:bold;">{score}</div>
@@ -1252,12 +1301,8 @@ async def create_financial_data(data: FinancialDataCreate):
 
     dcf_result = None
     if doc.get("free_cash_flow", 0) > 0 or doc.get("revenue", 0) > 0:
-        dcf_params = getattr(data, 'dcf_params', None)
-        if dcf_params:
-            dcf_params = dcf_params.model_dump() if hasattr(dcf_params, 'model_dump') else dcf_params
-        else:
-            dcf_params = {}
-        dcf_result = DCFValuationEngine.run_dcf(doc, dcf_params, company)
+        dcf_params = getattr(data, 'dcf_params', None) or {}
+        dcf_result = DCFValuation.run_dcf(doc, dcf_params, company)
 
     analysis_doc = {
         "company_id": company_oid,
@@ -1283,6 +1328,77 @@ async def create_financial_data(data: FinancialDataCreate):
         "analysis": health_analysis,
         "dcf": dcf_result,
     }
+
+@app.put("/api/financial-data/{financial_id}")
+async def update_financial_data(financial_id: str, data: FinancialDataUpdate):
+    """Update financial data and re-run analysis"""
+    try:
+        obj_id = ObjectId(financial_id)
+    except:
+        raise HTTPException(400, "Invalid financial data ID")
+
+    existing = await db.financial_data.find_one({"_id": obj_id})
+    if not existing:
+        raise HTTPException(404, "Financial data not found")
+
+    update_data = {k: v for k, v in data.model_dump().items() if v is not None}
+    update_data["updated_at"] = datetime.utcnow()
+
+    await db.financial_data.update_one(
+        {"_id": obj_id},
+        {"$set": update_data}
+    )
+
+    updated_doc = await db.financial_data.find_one({"_id": obj_id})
+
+    company = await db.companies.find_one({"_id": existing["company_id"]})
+    
+    ratios = engine.calculate_ratios(updated_doc)
+    health_analysis = engine.calculate_health_score(ratios, company.get("sector", "General"))
+
+    dcf_result = None
+    if updated_doc.get("free_cash_flow", 0) > 0 or updated_doc.get("revenue", 0) > 0:
+        dcf_params = data.dcf_params if hasattr(data, 'dcf_params') and data.dcf_params else {}
+        dcf_result = DCFValuation.run_dcf(updated_doc, dcf_params, company)
+
+    analysis_update = {
+        "overall_score": health_analysis["overall_score"],
+        "overall_color": health_analysis["overall_color"],
+        "overall_color_name": health_analysis["overall_color_name"],
+        "metrics": health_analysis["metrics"],
+        "ratios": health_analysis["ratios"],
+        "dcf_valuation": dcf_result,
+        "updated_at": datetime.utcnow(),
+    }
+
+    await db.analysis_results.update_one(
+        {"financial_data_id": financial_id},
+        {"$set": analysis_update},
+        upsert=True
+    )
+
+    return {
+        "message": "Financial data updated and re-analyzed successfully",
+        "analysis": health_analysis,
+        "dcf": dcf_result,
+    }
+
+@app.delete("/api/financial-data/{financial_id}")
+async def delete_financial_data(financial_id: str):
+    """Delete financial data and its analysis"""
+    try:
+        obj_id = ObjectId(financial_id)
+    except:
+        raise HTTPException(400, "Invalid financial data ID")
+
+    existing = await db.financial_data.find_one({"_id": obj_id})
+    if not existing:
+        raise HTTPException(404, "Financial data not found")
+
+    await db.financial_data.delete_one({"_id": obj_id})
+    await db.analysis_results.delete_many({"financial_data_id": financial_id})
+
+    return {"message": "Financial data and analysis deleted successfully"}
 
 @app.get("/api/analysis/{financial_data_id}")
 async def get_analysis(financial_data_id: str):
