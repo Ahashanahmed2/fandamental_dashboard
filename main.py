@@ -1,15 +1,17 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Form
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from bson import ObjectId
 from datetime import datetime
-from typing import Optional, Dict, List
+from typing import Optional, List, Dict
+import json
 import os
+import math
 
 from database import db, init_db
 from schemas import CompanyCreate, FinancialDataCreate
-from analysis_engine import AnalysisEngine, DCFValuation
+from analysis_engine import AnalysisEngine
 
 app = FastAPI(title="Financial Health Analyzer")
 
@@ -20,6 +22,107 @@ templates.env.cache = None
 
 # Analysis Engine instance
 engine = AnalysisEngine()
+
+# ==================== 🆕 DCF VALUATION ENGINE ====================
+class DCFValuation:
+    """Discounted Cash Flow ভ্যালুয়েশন ইঞ্জিন - সরল ও এফিশিয়েন্ট"""
+    
+    @staticmethod
+    def calculate_terminal_value(final_fcf: float, terminal_growth: float, wacc: float) -> float:
+        """Gordon Growth Model: TV = FCFₙ₊₁ / (WACC - g)"""
+        if wacc <= terminal_growth:
+            terminal_growth = wacc - 0.02
+        return (final_fcf * (1 + terminal_growth)) / (wacc - terminal_growth)
+    
+    @staticmethod
+    def discount_value(future_value: float, wacc: float, year: int) -> float:
+        """Present Value: PV = FV / (1+r)^n"""
+        return future_value / ((1 + wacc) ** year)
+    
+    @staticmethod
+    def run_dcf(financial_data: Dict, dcf_params: Dict, company_info: Dict) -> Dict:
+        """মেইন DCF ক্যালকুলেশন ফাংশন"""
+        # ১. বেসিক ডেটা এক্সট্রাক্ট
+        revenue = financial_data.get("revenue", 0) or 0
+        current_fcf = financial_data.get("free_cash_flow", 0) or 0
+        fcf_margin = financial_data.get("fcf_margin", 0) or (current_fcf / revenue if revenue > 0 else 0.05)
+        
+        shares_outstanding = financial_data.get("shares_outstanding", 1) or 1        net_debt = (financial_data.get("total_debt", 0) or 0) - (financial_data.get("cash_and_equivalents", 0) or 0)
+        current_price = financial_data.get("current_price", 0) or 0
+        
+        # ২. DCF প্যারামিটার্স
+        projection_years = dcf_params.get("projection_years", 5)
+        growth_rates = dcf_params.get("growth_rates", [0.08, 0.07, 0.06, 0.05, 0.04])[:projection_years]
+        wacc = dcf_params.get("wacc", 0.15)
+        terminal_growth = dcf_params.get("terminal_growth", 0.03)
+        margin_of_safety = dcf_params.get("margin_of_safety", 0.20)
+        
+        # ৩. FCF প্রজেকশন
+        base_fcf = current_fcf if current_fcf > 0 else revenue * fcf_margin
+        fcf_projections = []
+        for i, growth in enumerate(growth_rates):
+            if i == 0:
+                projected = base_fcf * (1 + growth)
+            else:
+                projected = fcf_projections[-1] * (1 + growth)
+            fcf_projections.append(max(0, projected))
+        
+        # ৪. PV of Projected FCF
+        pv_fcf_sum = sum([DCFValuation.discount_value(fcf, wacc, i+1) for i, fcf in enumerate(fcf_projections)])
+        
+        # ৫. Terminal Value & PV
+        terminal_value = DCFValuation.calculate_terminal_value(fcf_projections[-1] if fcf_projections else 0, terminal_growth, wacc)
+        pv_terminal = DCFValuation.discount_value(terminal_value, wacc, projection_years)
+        
+        # ৬. Enterprise Value → Equity Value → Per Share Value
+        enterprise_value = pv_fcf_sum + pv_terminal
+        equity_value = enterprise_value - net_debt
+        intrinsic_value_per_share = equity_value / shares_outstanding if shares_outstanding > 0 else 0
+        
+        # ৭. Margin of Safety Adjusted Value
+        mos_adjusted_value = intrinsic_value_per_share * (1 - margin_of_safety)
+        
+        # ৮. Investment Signal
+        if current_price > 0:
+            upside = ((intrinsic_value_per_share - current_price) / current_price) * 100
+            if intrinsic_value_per_share > current_price * (1 + margin_of_safety):
+                signal = "BUY"
+                signal_color = "#10b981"
+            elif intrinsic_value_per_share < current_price * (1 - margin_of_safety):
+                signal = "SELL"
+                signal_color = "#ef4444"
+            else:
+                signal = "HOLD"
+                signal_color = "#f59e0b"
+        else:
+            upside = None
+            signal = "N/A"            signal_color = "#64748b"
+        
+        return {
+            "inputs": {
+                "wacc_percent": round(wacc * 100, 2),
+                "terminal_growth_percent": round(terminal_growth * 100, 2),
+                "projection_years": projection_years,
+                "margin_of_safety_percent": round(margin_of_safety * 100, 2),
+                "growth_rates_percent": [round(g*100, 1) for g in growth_rates]
+            },
+            "enterprise_value": round(enterprise_value, 2),
+            "equity_value": round(equity_value, 2),
+            "intrinsic_value_per_share": round(intrinsic_value_per_share, 2),
+            "mos_adjusted_value": round(mos_adjusted_value, 2),
+            "current_price": current_price,
+            "upside_percent": round(upside, 2) if upside is not None else None,
+            "signal": signal,
+            "signal_color": signal_color,
+            "fcf_projections": [round(f, 2) for f in fcf_projections],
+            "pv_fcf_sum": round(pv_fcf_sum, 2),
+            "pv_terminal": round(pv_terminal, 2),
+            "terminal_value": round(terminal_value, 2),
+            "net_debt": round(net_debt, 2),
+            "calculation_note": "DCF based on Free Cash Flow projection with Gordon Growth Terminal Value"
+        }
+# ==================== ✅ DCF ENGINE END ====================
+
 
 # ---------------------- Startup ----------------------
 @app.on_event("startup")
@@ -34,7 +137,6 @@ async def health_check():
 
 @app.head("/health")
 async def health_check_head():
-    """HEAD request for UptimeRobot"""
     return HTMLResponse(content="", status_code=200)
 
 # ---------------------- Pages ----------------------
@@ -44,10 +146,10 @@ async def home(request: Request):
     companies = await db.companies.find({"is_active": True}).to_list(100)
     for c in companies:
         c["_id"] = str(c["_id"])
-
     html = """<!DOCTYPE html>
 <html>
-<head>    <title>Financial Analyzer</title>
+<head>
+    <title>Financial Analyzer</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
     <link rel="manifest" href="/static/manifest.json">
@@ -73,16 +175,12 @@ async def home(request: Request):
         <a href="/add-company" style="background:#3b82f6;color:white;padding:10px 24px;border-radius:8px;text-decoration:none;display:inline-block;margin-bottom:20px;">+ Add Company</a>
         <div id="companyList">
 """
-
     if companies:
         for c in companies:
             html += f"""
             <div class="company-card" id="company-{c['_id']}">
                 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-                    <div>
-                        <strong>{c['name']}</strong> ({c['ticker']}) | 
-                        <span style="background:#06b6d4;padding:2px 10px;border-radius:20px;font-size:12px;">{c.get('sector','')}</span>
-                    </div>
+                    <div><strong>{c['name']}</strong> ({c['ticker']}) | <span style="background:#06b6d4;padding:2px 10px;border-radius:20px;font-size:12px;">{c.get('sector','')}</span></div>
                     <div>
                         <button class="btn-action btn-edit" onclick="editCompany('{c['_id']}')" title="Edit"><i class="bi bi-pencil"></i> Edit</button>
                         <button class="btn-action btn-delete" onclick="deleteCompany('{c['_id']}')" title="Delete"><i class="bi bi-trash"></i> Delete</button>
@@ -98,90 +196,32 @@ async def home(request: Request):
 
     html += """        </div>
     </div>
-
-    <!-- Edit Modal -->
     <div class="modal-overlay" id="editModal">
         <div class="modal-box">
             <h3>✏️ Edit Company</h3>
             <form id="editForm">
                 <input type="hidden" id="editCompanyId">
-                <div class="mb-3">
-                    <label>Company Name</label>
-                    <input type="text" id="editName" class="form-control" required style="background:#334155;color:white;border:1px solid #475569;">
-                </div>
-                <div class="mb-3">
-                    <label>Ticker</label>
-                    <input type="text" id="editTicker" class="form-control" required style="background:#334155;color:white;border:1px solid #475569;">
-                </div>
-                <div class="mb-3">
-                    <label>Sector</label>
-                    <select id="editSector" class="form-control" style="background:#334155;color:white;border:1px solid #475569;">
-                        <option value="Bank">🏦 Bank</option><option value="Pharmaceuticals">💊 Pharmaceuticals</option>
-                        <option value="Textile">👕 Textile</option><option value="Telecom">📱 Telecom</option>
-                        <option value="Food">🍔 Food & Beverage</option><option value="Energy">⚡ Energy</option>
-                        <option value="Cement">🏗️ Cement</option><option value="General">📦 General</option>
-                    </select>
-                </div>
-                <div class="mb-3">
-                    <label>Sub Sector (Optional)</label>
-                    <input type="text" id="editSubSector" class="form-control" style="background:#334155;color:white;border:1px solid #475569;">
-                </div>
-                <div style="display:flex;gap:10px;">
-                    <button type="submit" class="btn btn-primary" style="flex:1;">💾 Save Changes</button>
-                    <button type="button" class="btn btn-secondary" onclick="closeEditModal()" style="flex:1;">Cancel</button>
-                </div>
+                <div class="mb-3"><label>Company Name</label><input type="text" id="editName" class="form-control" required style="background:#334155;color:white;border:1px solid #475569;"></div>
+                <div class="mb-3"><label>Ticker</label><input type="text" id="editTicker" class="form-control" required style="background:#334155;color:white;border:1px solid #475569;"></div>
+                <div class="mb-3"><label>Sector</label><select id="editSector" class="form-control" style="background:#334155;color:white;border:1px solid #475569;">
+                    <option value="Bank">🏦 Bank</option><option value="Pharmaceuticals">💊 Pharmaceuticals</option>
+                    <option value="Textile">👕 Textile</option><option value="Telecom">📱 Telecom</option>
+                    <option value="Food">🍔 Food & Beverage</option><option value="Energy">⚡ Energy</option>
+                    <option value="Cement">🏗️ Cement</option><option value="General">📦 General</option>
+                </select></div>
+                <div class="mb-3"><label>Sub Sector (Optional)</label><input type="text" id="editSubSector" class="form-control" style="background:#334155;color:white;border:1px solid #475569;"></div>
+                <div style="display:flex;gap:10px;"><button type="submit" class="btn btn-primary" style="flex:1;">💾 Save Changes</button><button type="button" class="btn btn-secondary" onclick="closeEditModal()" style="flex:1;">Cancel</button></div>
             </form>
         </div>
     </div>
-
-    <!-- Toast Notification -->
     <div class="toast" id="toast"></div>
-
     <script>
         if ('serviceWorker' in navigator) navigator.serviceWorker.register('/static/sw.js');
-        function showToast(message, type = 'success') {
-            const toast = document.getElementById('toast'); toast.textContent = message;
-            toast.className = 'toast toast-' + type; toast.style.display = 'block';
-            setTimeout(() => { toast.style.display = 'none'; }, 3000);
-        }
-        async function editCompany(companyId) {
-            try {                const response = await fetch('/api/companies');
-                const companies = await response.json();
-                const company = companies.find(c => c._id === companyId);
-                if (company) {
-                    document.getElementById('editCompanyId').value = company._id;
-                    document.getElementById('editName').value = company.name;
-                    document.getElementById('editTicker').value = company.ticker;
-                    document.getElementById('editSector').value = company.sector;
-                    document.getElementById('editSubSector').value = company.sub_sector || '';
-                    document.getElementById('editModal').style.display = 'flex';
-                }
-            } catch (error) { showToast('Error loading company data', 'error'); }
-        }
+        function showToast(message, type = 'success') { const toast = document.getElementById('toast'); toast.textContent = message; toast.className = 'toast toast-' + type; toast.style.display = 'block'; setTimeout(() => { toast.style.display = 'none'; }, 3000); }
+        async function editCompany(companyId) { try { const response = await fetch('/api/companies'); const companies = await response.json(); const company = companies.find(c => c._id === companyId); if (company) { document.getElementById('editCompanyId').value = company._id; document.getElementById('editName').value = company.name; document.getElementById('editTicker').value = company.ticker; document.getElementById('editSector').value = company.sector; document.getElementById('editSubSector').value = company.sub_sector || ''; document.getElementById('editModal').style.display = 'flex'; } } catch (error) { showToast('Error loading company data', 'error'); } }
         function closeEditModal() { document.getElementById('editModal').style.display = 'none'; }
-        document.getElementById('editForm').addEventListener('submit', async function(e) {
-            e.preventDefault();
-            const companyId = document.getElementById('editCompanyId').value;
-            try {
-                const response = await fetch('/api/companies/' + companyId, {
-                    method: 'PUT', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name: document.getElementById('editName').value, ticker: document.getElementById('editTicker').value.toUpperCase(), sector: document.getElementById('editSector').value, sub_sector: document.getElementById('editSubSector').value || null })
-                });
-                if (response.ok) { closeEditModal(); showToast('Company updated successfully!'); setTimeout(() => location.reload(), 500); }
-                else { const err = await response.json(); showToast('Error: ' + (err.detail || 'Update failed'), 'error'); }
-            } catch (error) { showToast('Error updating company', 'error'); }
-        });
-        async function deleteCompany(companyId) {
-            const companyCard = document.getElementById('company-' + companyId);
-            const companyName = companyCard.querySelector('strong').textContent;
-            if (confirm('Are you sure you want to delete "' + companyName + '"?\\n\\nThis action cannot be undone!')) {
-                try {
-                    const response = await fetch('/api/companies/' + companyId, { method: 'DELETE' });
-                    if (response.ok) { companyCard.remove(); showToast('Company deleted successfully!'); const remaining = document.querySelectorAll('.company-card'); if (remaining.length === 0) { document.getElementById('companyList').innerHTML = '<p style="margin-top:30px;color:#94a3b8;">No companies added yet. Click "Add Company" to get started.</p>'; } }
-                    else { const err = await response.json(); showToast('Error: ' + (err.detail || 'Delete failed'), 'error'); }
-                } catch (error) { showToast('Error deleting company', 'error'); }
-            }
-        }
+        document.getElementById('editForm').addEventListener('submit', async function(e) { e.preventDefault(); const companyId = document.getElementById('editCompanyId').value; try { const response = await fetch('/api/companies/' + companyId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: document.getElementById('editName').value, ticker: document.getElementById('editTicker').value.toUpperCase(), sector: document.getElementById('editSector').value, sub_sector: document.getElementById('editSubSector').value || null }) }); if (response.ok) { closeEditModal(); showToast('Company updated successfully!'); setTimeout(() => location.reload(), 500); } else { const err = await response.json(); showToast('Error: ' + (err.detail || 'Update failed'), 'error'); } } catch (error) { showToast('Error updating company', 'error'); } });
+        async function deleteCompany(companyId) { const companyCard = document.getElementById('company-' + companyId); const companyName = companyCard.querySelector('strong').textContent; if (confirm('Are you sure you want to delete "' + companyName + '"?\\n\\nThis action cannot be undone!')) { try { const response = await fetch('/api/companies/' + companyId, { method: 'DELETE' }); if (response.ok) { companyCard.remove(); showToast('Company deleted successfully!'); const remaining = document.querySelectorAll('.company-card'); if (remaining.length === 0) { document.getElementById('companyList').innerHTML = '<p style="margin-top:30px;color:#94a3b8;">No companies added yet. Click "Add Company" to get started.</p>'; } } else { const err = await response.json(); showToast('Error: ' + (err.detail || 'Delete failed'), 'error'); } } catch (error) { showToast('Error deleting company', 'error'); } } }
         document.getElementById('editModal').addEventListener('click', function(e) { if (e.target === this) closeEditModal(); });
     </script>
 </body>
@@ -190,14 +230,9 @@ async def home(request: Request):
 
 @app.get("/add-company", response_class=HTMLResponse)
 async def add_company_page(request: Request):
-    """Form to add new company"""
     html = """<!DOCTYPE html>
 <html>
-<head>
-    <title>Add Company</title>    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="manifest" href="/static/manifest.json">
-    <meta name="theme-color" content="#3b82f6">
-</head>
+<head><title>Add Company</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"></head>
 <body style="background:#0f172a;color:white;padding:40px;font-family:Arial;">
     <div style="max-width:500px;margin:60px auto;background:#1e293b;padding:30px;border-radius:15px;">
         <h3>➕ Add New Company</h3>
@@ -208,24 +243,14 @@ async def add_company_page(request: Request):
                 <option value="Bank">🏦 Bank</option><option value="Pharmaceuticals">💊 Pharmaceuticals</option>
                 <option value="Textile">👕 Textile</option><option value="Telecom">📱 Telecom</option>
                 <option value="Food">🍔 Food & Beverage</option><option value="Energy">⚡ Energy</option>
-                <option value="Cement">🏗️ Cement</option><option value="General">📦 General</option>
-            </select>
+                <option value="Cement">🏗️ Cement</option><option value="General">📦 General</option>            </select>
             <input id="sub" class="form-control mb-3" placeholder="Sub Sector (Optional)" style="background:#334155;color:white;border:1px solid #475569;">
             <button type="submit" class="btn btn-primary w-100">💾 Save Company</button>
         </form>
         <a href="/" style="color:#94a3b8;display:block;margin-top:12px;text-align:center;">⬅ Back to Dashboard</a>
     </div>
     <script>
-        document.getElementById('f').addEventListener('submit',async e=>{
-            e.preventDefault();
-            let r=await fetch('/api/companies',{
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({ name:document.getElementById('n').value, ticker:document.getElementById('t').value.toUpperCase(), sector:document.getElementById('s').value, sub_sector:document.getElementById('sub').value||null })
-            });
-            if(r.ok){window.location.href='/';}
-            else{let err=await r.json();alert('Error: '+(err.detail||'Failed'));}
-        });
+        document.getElementById('f').addEventListener('submit',async e=>{ e.preventDefault(); let r=await fetch('/api/companies',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ name:document.getElementById('n').value, ticker:document.getElementById('t').value.toUpperCase(), sector:document.getElementById('s').value, sub_sector:document.getElementById('sub').value||null }) }); if(r.ok){window.location.href='/';} else{let err=await r.json();alert('Error: '+(err.detail||'Failed'));} });
     </script>
 </body>
 </html>"""
@@ -241,9 +266,11 @@ async def input_data_page(request: Request, company_id: str):
     if not company:
         raise HTTPException(404, "Company not found")
 
+    # ✅ ফিক্সড: প্রতিটি ভেরিয়েবল আলাদা লাইনে
     company_id_str = str(company["_id"])
     company_name = company["name"]
-    company_ticker = company["ticker"]    company_sector = company["sector"]
+    company_ticker = company["ticker"]
+    company_sector = company["sector"]
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -261,17 +288,15 @@ async def input_data_page(request: Request, company_id: str):
         .btn-submit:hover {{ background: #219a52; }}
         label {{ font-weight: 600; margin-top: 8px; }}
         input, select {{ margin-bottom: 6px; }}
+        .dcf-note {{ font-size: 12px; color: #64748b; margin-top: 4px; }}
     </style>
 </head>
 <body>
-    <div class="container">
-        <h2 class="mb-4">📊 Financial Data Input - {company_name} ({company_ticker})</h2>
+    <div class="container">        <h2 class="mb-4">📊 Financial Data Input - {company_name} ({company_ticker})</h2>
         <span class="badge bg-info mb-3">{company_sector} Sector</span>
         <a href="/" class="btn btn-sm btn-secondary float-end">⬅ Back to Dashboard</a>
-
         <form id="financialForm">
             <input type="hidden" id="companyId" value="{company_id_str}">
-            
             <div class="form-section">
                 <h5 class="section-title">📅 Report Information</h5>
                 <div class="row">
@@ -280,7 +305,6 @@ async def input_data_page(request: Request, company_id: str):
                     <div class="col-md-3" id="quarterDiv" style="display:none;"><label>Quarter</label><select class="form-control" id="quarter"><option value="1">Q1</option><option value="2">Q2</option><option value="3">Q3</option><option value="4">Q4</option></select></div>
                 </div>
             </div>
-
             <div class="form-section">
                 <h5 class="section-title">📋 Balance Sheet</h5>
                 <div class="row">
@@ -292,9 +316,9 @@ async def input_data_page(request: Request, company_id: str):
                     <div class="col-md-4"><label>Total Debt</label><input type="number" step="0.01" class="form-control" id="totalDebt" placeholder="0.00"></div>
                     <div class="col-md-4"><label>Cash & Equivalents</label><input type="number" step="0.01" class="form-control" id="cash" placeholder="0.00"></div>
                     <div class="col-md-4"><label>Current Assets</label><input type="number" step="0.01" class="form-control" id="currentAssets" placeholder="0.00"></div>
-                </div>                <div class="row mt-3"><div class="col-md-4"><label>Current Liabilities</label><input type="number" step="0.01" class="form-control" id="currentLiabilities" placeholder="0.00"></div></div>
+                </div>
+                <div class="row mt-3"><div class="col-md-4"><label>Current Liabilities</label><input type="number" step="0.01" class="form-control" id="currentLiabilities" placeholder="0.00"></div></div>
             </div>
-
             <div class="form-section">
                 <h5 class="section-title">📈 Income Statement</h5>
                 <div class="row">
@@ -309,7 +333,6 @@ async def input_data_page(request: Request, company_id: str):
                     <div class="col-md-3"><label>Net Income</label><input type="number" step="0.01" class="form-control" id="netIncome" placeholder="0.00"></div>
                 </div>
             </div>
-
             <div class="form-section">
                 <h5 class="section-title">💵 Cash Flow</h5>
                 <div class="row">
@@ -318,9 +341,7 @@ async def input_data_page(request: Request, company_id: str):
                     <div class="col-md-4"><label>Free Cash Flow</label><input type="number" step="0.01" class="form-control" id="fcf" placeholder="0.00"></div>
                 </div>
             </div>
-
-            <div class="form-section">
-                <h5 class="section-title">📊 Per Share Data</h5>
+            <div class="form-section">                <h5 class="section-title">📊 Per Share Data</h5>
                 <div class="row">
                     <div class="col-md-3"><label>EPS</label><input type="number" step="0.01" class="form-control" id="eps" placeholder="0.00"></div>
                     <div class="col-md-3"><label>DPS</label><input type="number" step="0.01" class="form-control" id="dps" placeholder="0.00"></div>
@@ -328,7 +349,6 @@ async def input_data_page(request: Request, company_id: str):
                     <div class="col-md-3"><label>Current Stock Price</label><input type="number" step="0.01" class="form-control" id="currentPrice" placeholder="0.00"></div>
                 </div>
             </div>
-
             <!-- 🆕 DCF Valuation Settings -->
             <div class="form-section" id="dcfSection">
                 <h5 class="section-title">📊 DCF Valuation Settings <small style="font-weight:normal;color:#64748b;">(Optional)</small></h5>
@@ -340,8 +360,8 @@ async def input_data_page(request: Request, company_id: str):
                 </div>
                 <div class="mb-3"><label>Annual Growth Rates (%)</label><div id="growthRatesContainer" class="d-flex gap-2 flex-wrap"></div></div>
             </div>
-
-            <div class="form-section bank-fields" id="bankFields">                <h5 class="section-title">🏦 Bank Specific</h5>
+            <div class="form-section bank-fields" id="bankFields">
+                <h5 class="section-title">🏦 Bank Specific</h5>
                 <div class="row">
                     <div class="col-md-4"><label>Total Deposits</label><input type="number" step="0.01" class="form-control" id="totalDeposits" placeholder="0.00"></div>
                     <div class="col-md-4"><label>Total Loans</label><input type="number" step="0.01" class="form-control" id="totalLoans" placeholder="0.00"></div>
@@ -352,17 +372,13 @@ async def input_data_page(request: Request, company_id: str):
                     <div class="col-md-4"><label>CAR (%)</label><input type="number" step="0.01" class="form-control" id="carRatio" placeholder="0.00"></div>
                 </div>
             </div>
-
             <button type="submit" class="btn-submit btn-lg mt-3">📊 Analyze & Save</button>
         </form>
     </div>
-
     <script>
         document.getElementById('reportType').addEventListener('change', function() {{ document.getElementById('quarterDiv').style.display = this.value === 'quarterly' ? 'block' : 'none'; }});
         var sector = "{company_sector}";
         if (sector === "Bank") {{ document.getElementById('bankFields').style.display = 'block'; }}
-        
-        // DCF Growth Inputs
         function renderGrowthInputs(years = 5) {{
             const container = document.getElementById('growthRatesContainer');
             container.innerHTML = '';
@@ -373,12 +389,9 @@ async def input_data_page(request: Request, company_id: str):
         }}
         renderGrowthInputs(5);
         document.getElementById('dcfYears').addEventListener('change', (e) => renderGrowthInputs(parseInt(e.target.value)));
-
         document.getElementById('financialForm').addEventListener('submit', async function(e) {{
-            e.preventDefault();
-            var btn = this.querySelector('button[type="submit"]');
+            e.preventDefault();            var btn = this.querySelector('button[type="submit"]');
             btn.disabled = true; btn.innerHTML = '⏳ Analyzing...';
-            
             var data = {{
                 company_id: document.getElementById('companyId').value, report_type: document.getElementById('reportType').value,
                 year: parseInt(document.getElementById('year').value), quarter: document.getElementById('reportType').value === 'quarterly' ? parseInt(document.getElementById('quarter').value) : null,
@@ -390,12 +403,12 @@ async def input_data_page(request: Request, company_id: str):
                 ebit: parseFloat(document.getElementById('ebit').value) || 0, ebitda: parseFloat(document.getElementById('ebitda').value) || 0,
                 interest_expense: parseFloat(document.getElementById('interestExpense').value) || 0, net_income: parseFloat(document.getElementById('netIncome').value) || 0,
                 operating_cash_flow: parseFloat(document.getElementById('ocf').value) || 0, capex: parseFloat(document.getElementById('capex').value) || 0,
-                free_cash_flow: parseFloat(document.getElementById('fcf').value) || 0, eps: parseFloat(document.getElementById('eps').value) || 0,                dps: parseFloat(document.getElementById('dps').value) || 0, shares_outstanding: parseFloat(document.getElementById('sharesOut').value) || 0,
+                free_cash_flow: parseFloat(document.getElementById('fcf').value) || 0, eps: parseFloat(document.getElementById('eps').value) || 0,
+                dps: parseFloat(document.getElementById('dps').value) || 0, shares_outstanding: parseFloat(document.getElementById('sharesOut').value) || 0,
                 current_price: parseFloat(document.getElementById('currentPrice').value) || 0,
                 total_deposits: parseFloat(document.getElementById('totalDeposits')?.value) || null, total_loans: parseFloat(document.getElementById('totalLoans')?.value) || null,
                 npl_ratio: parseFloat(document.getElementById('nplRatio')?.value) || null, car_ratio: parseFloat(document.getElementById('carRatio')?.value) || null,
                 net_interest_income: parseFloat(document.getElementById('nii')?.value) || null,
-                // 🆕 DCF Params
                 dcf_params: {{
                     projection_years: parseInt(document.getElementById('dcfYears').value),
                     growth_rates: Array.from(document.querySelectorAll('.growth-rate')).map(inp => parseFloat(inp.value)/100),
@@ -404,7 +417,6 @@ async def input_data_page(request: Request, company_id: str):
                     margin_of_safety: parseFloat(document.getElementById('dcfMos').value)/100
                 }}
             }};
-            
             try {{
                 var response = await fetch('/api/financial-data', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(data) }});
                 var result = await response.json();
@@ -419,19 +431,15 @@ async def input_data_page(request: Request, company_id: str):
 
 @app.get("/analysis/{company_id}", response_class=HTMLResponse)
 async def view_analysis(request: Request, company_id: str):
-    """View analysis results"""
     try:
         company = await db.companies.find_one({"_id": ObjectId(company_id)})
     except:
         raise HTTPException(400, "Invalid company ID")
     if not company:
         raise HTTPException(404, "Company not found")
-
     company_id_str = str(company["_id"])
     company_name = company["name"]
-    company_ticker = company["ticker"]
-    company_sector = company.get("sector", "")
-
+    company_ticker = company["ticker"]    company_sector = company.get("sector", "")
     financials = await db.financial_data.find({"company_id": ObjectId(company_id)}).sort([("year", -1), ("quarter", -1)]).to_list(10)
     analyses_html = ""
     for fin in financials:
@@ -439,27 +447,23 @@ async def view_analysis(request: Request, company_id: str):
         analysis = await db.analysis_results.find_one({"financial_data_id": fin_id})
         if analysis:
             rtype = fin.get("report_type", "").title()
-            year = fin.get("year", "")            quarter = f" Q{fin.get('quarter')}" if fin.get("quarter") else ""
+            year = fin.get("year", "")
+            quarter = f" Q{fin.get('quarter')}" if fin.get('quarter') else ""
             score = analysis.get("overall_score", 0)
             color = analysis.get("overall_color", "#fff")
             color_name = analysis.get("overall_color_name", "")
             metrics_rows = ""
             for m in analysis.get("metrics", []):
                 metrics_rows += f"""<tr><td>{m.get('metric','')}</td><td>{m.get('value','')}</td><td>{m.get('score','')}%</td><td style="background:{m.get('color','')};color:white;font-weight:bold;">{m.get('color_name','')}</td></tr>"""
-            
             dcf_html = ""
             if analysis.get("dcf_valuation"):
                 d = analysis["dcf_valuation"]
                 dcf_html = f"""<div style="margin-top:15px;padding:12px;background:rgba(6,182,212,0.1);border-radius:8px;border-left:4px solid #06b6d4;"><strong>📊 DCF Value:</strong> {d.get('intrinsic_value_per_share', 'N/A')} টাকা <span style="background:{d.get('signal_color','#64748b')};color:white;padding:2px 10px;border-radius:12px;font-size:12px;margin-left:8px;">{d.get('signal','N/A')}</span>{f"<span style='color:#10b981;margin-left:8px;'>↑ {d.get('upside_percent',0)}% upside</span>" if d.get('upside_percent') and d.get('upside_percent') > 0 else ""}</div>"""
-
             analyses_html += f"""<div style="background:#1e293b;padding:20px;border-radius:15px;margin-bottom:20px;"><h4>{rtype} - {year}{quarter}</h4><div style="text-align:center;margin:25px 0;"><h2 style="color:{color};font-size:3rem;">{score}/100</h2><h4 style="color:{color};">{color_name}</h4></div><table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#334155;"><th style="padding:12px;text-align:left;">Metric</th><th style="padding:12px;">Value</th><th style="padding:12px;">Score</th><th style="padding:12px;">Status</th></tr></thead><tbody>{metrics_rows}</tbody></table>{dcf_html}</div>"""
-
     if not analyses_html:
         analyses_html = f'<div style="text-align:center;padding:40px;"><h4>No analysis data found</h4><a href="/input-data/{company_id_str}" style="color:#10b981;">📝 Add Financial Data</a></div>'
-
     html = f"""<!DOCTYPE html>
-<html>
-<head><title>Analysis - {company_name}</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"></head>
+<html><head><title>Analysis - {company_name}</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"></head>
 <body style="background:#0f172a;color:white;padding:30px;font-family:Arial;">
     <div style="max-width:900px;margin:0 auto;"><div style="background:#1e293b;padding:25px;border-radius:15px;margin-bottom:25px;"><h2>{company_name} ({company_ticker})</h2><span style="background:#06b6d4;padding:5px 14px;border-radius:20px;">{company_sector}</span><a href="/input-data/{company_id_str}" style="float:right;background:#10b981;color:white;padding:10px 20px;border-radius:8px;text-decoration:none;">📝 Add New Data</a></div>{analyses_html}<a href="/" style="display:inline-block;margin-top:20px;color:#94a3b8;">⬅ Back to Dashboard</a></div>
 </body></html>"""
@@ -467,43 +471,36 @@ async def view_analysis(request: Request, company_id: str):
 
 @app.get("/result/{financial_id}", response_class=HTMLResponse)
 async def view_result(request: Request, financial_id: str):
-    """View single analysis result"""
     analysis = await db.analysis_results.find_one({"financial_data_id": financial_id})
     if not analysis:
         raise HTTPException(404, "Analysis not found")
-
     name = analysis.get("company_name", "")
     ticker = analysis.get("ticker", "")
     sector = analysis.get("sector", "")
     rtype = analysis.get("report_type", "").title()
     year = analysis.get("year", "")
-    quarter = f" Q{analysis.get('quarter')}" if analysis.get("quarter") else ""
+    quarter = f" Q{analysis.get('quarter')}" if analysis.get('quarter') else ""
     score = analysis.get("overall_score", 0)
     color = analysis.get("overall_color", "#fff")
     color_name = analysis.get("overall_color_name", "")
     metrics_rows = ""
     for m in analysis.get("metrics", []):
         metrics_rows += f"""<tr><td>{m.get('metric','')}</td><td>{m.get('value','')}</td><td>{m.get('score','')}%</td><td style="background:{m.get('color','')};color:white;font-weight:bold;">{m.get('color_name','')}</td></tr>"""
-
     dcf_card = ""
     if analysis.get("dcf_valuation"):
-        d = analysis["dcf_valuation"]
-        fcf_rows = "".join([f"<tr><td>Year {i+1}</td><td>{val} M</td></tr>" for i, val in enumerate(d.get('fcf_projections', []))])        dcf_card = f"""<div style="margin-top:30px;background:#1e293b;padding:25px;border-radius:15px;border:2px solid #06b6d4;"><h4 style="text-align:center;color:#06b6d4;margin-bottom:20px;">📊 DCF Intrinsic Valuation</h4><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:15px;text-align:center;margin-bottom:25px;"><div style="background:#334155;padding:15px;border-radius:10px;"><div style="color:#94a3b8;font-size:13px;">Current Price</div><div style="font-size:1.3rem;font-weight:bold;">{d.get('current_price',0)} টাকা</div></div><div style="background:#334155;padding:15px;border-radius:10px;"><div style="color:#94a3b8;font-size:13px;">Intrinsic Value</div><div style="font-size:1.3rem;font-weight:bold;color:#10b981;">{d.get('intrinsic_value_per_share',0)} টাকা</div></div><div style="background:#334155;padding:15px;border-radius:10px;"><div style="color:#94a3b8;font-size:13px;">MoS Value</div><div style="font-size:1.3rem;font-weight:bold;color:#f59e0b;">{d.get('mos_adjusted_value',0)} টাকা</div></div><div style="background:#334155;padding:15px;border-radius:10px;"><div style="color:#94a3b8;font-size:13px;">Upside</div><div style="font-size:1.3rem;font-weight:bold;color:{d.get('signal_color','#64748b')};">{d.get('upside_percent','N/A')}%</div></div></div><div style="text-align:center;margin:20px 0;"><span style="background:{d.get('signal_color','#64748b')};color:white;padding:10px 30px;border-radius:30px;font-weight:bold;font-size:1.2rem;">{d.get('signal','N/A')} SIGNAL</span></div><details style="margin-top:20px;"><summary style="cursor:pointer;color:#94a3b8;font-weight:500;">🔍 DCF Calculation Details</summary><div style="margin-top:15px;background:#334155;padding:15px;border-radius:8px;"><table style="width:100%;font-size:14px;"><tr><td style="padding:6px 0;">WACC</td><td style="padding:6px 0;text-align:right;">{d.get('inputs',{{}}).get('wacc_percent','N/A')}%</td></tr><tr><td style="padding:6px 0;">Terminal Growth</td><td style="padding:6px 0;text-align:right;">{d.get('inputs',{{}}).get('terminal_growth_percent','N/A')}%</td></tr><tr><td style="padding:6px 0;">Projection Period</td><td style="padding:6px 0;text-align:right;">{d.get('inputs',{{}}).get('projection_years','N/A')} Years</td></tr><tr><td style="padding:6px 0;">PV of FCF</td><td style="padding:6px 0;text-align:right;">{d.get('pv_fcf_sum','N/A')} M</td></tr><tr><td style="padding:6px 0;">PV of Terminal</td><td style="padding:6px 0;text-align:right;">{d.get('pv_terminal','N/A')} M</td></tr><tr><td style="padding:6px 0;">Enterprise Value</td><td style="padding:6px 0;text-align:right;">{d.get('enterprise_value','N/A')} M</td></tr><tr><td style="padding:6px 0;">Net Debt</td><td style="padding:6px 0;text-align:right;">{d.get('net_debt','N/A')} M</td></tr></table></div></details><details style="margin-top:15px;"><summary style="cursor:pointer;color:#94a3b8;font-weight:500;">📈 FCF Projections</summary><div style="margin-top:10px;background:#334155;padding:10px;border-radius:8px;"><table style="width:100%;font-size:13px;"><thead><tr style="border-bottom:1px solid #475569;"><th style="padding:8px;text-align:left;">Year</th><th style="padding:8px;text-align:right;">Projected FCF</th></tr></thead><tbody>{fcf_rows}</tbody></table></div></details><p style="margin-top:15px;font-size:12px;color:#94a3b8;text-align:center;">💡 {d.get('calculation_note','')}</p></div>"""
-
+        d = analysis["dcf_valuation"]        fcf_rows = "".join([f"<tr><td>Year {i+1}</td><td>{val} M</td></tr>" for i, val in enumerate(d.get('fcf_projections', []))])
+        dcf_card = f"""<div style="margin-top:30px;background:#1e293b;padding:25px;border-radius:15px;border:2px solid #06b6d4;"><h4 style="text-align:center;color:#06b6d4;margin-bottom:20px;">📊 DCF Intrinsic Valuation</h4><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:15px;text-align:center;margin-bottom:25px;"><div style="background:#334155;padding:15px;border-radius:10px;"><div style="color:#94a3b8;font-size:13px;">Current Price</div><div style="font-size:1.3rem;font-weight:bold;">{d.get('current_price',0)} টাকা</div></div><div style="background:#334155;padding:15px;border-radius:10px;"><div style="color:#94a3b8;font-size:13px;">Intrinsic Value</div><div style="font-size:1.3rem;font-weight:bold;color:#10b981;">{d.get('intrinsic_value_per_share',0)} টাকা</div></div><div style="background:#334155;padding:15px;border-radius:10px;"><div style="color:#94a3b8;font-size:13px;">MoS Value</div><div style="font-size:1.3rem;font-weight:bold;color:#f59e0b;">{d.get('mos_adjusted_value',0)} টাকা</div></div><div style="background:#334155;padding:15px;border-radius:10px;"><div style="color:#94a3b8;font-size:13px;">Upside</div><div style="font-size:1.3rem;font-weight:bold;color:{d.get('signal_color','#64748b')};">{d.get('upside_percent','N/A')}%</div></div></div><div style="text-align:center;margin:20px 0;"><span style="background:{d.get('signal_color','#64748b')};color:white;padding:10px 30px;border-radius:30px;font-weight:bold;font-size:1.2rem;">{d.get('signal','N/A')} SIGNAL</span></div><details style="margin-top:20px;"><summary style="cursor:pointer;color:#94a3b8;font-weight:500;">🔍 DCF Calculation Details</summary><div style="margin-top:15px;background:#334155;padding:15px;border-radius:8px;"><table style="width:100%;font-size:14px;"><tr><td style="padding:6px 0;">WACC</td><td style="padding:6px 0;text-align:right;">{d.get('inputs',{{}}).get('wacc_percent','N/A')}%</td></tr><tr><td style="padding:6px 0;">Terminal Growth</td><td style="padding:6px 0;text-align:right;">{d.get('inputs',{{}}).get('terminal_growth_percent','N/A')}%</td></tr><tr><td style="padding:6px 0;">Projection Period</td><td style="padding:6px 0;text-align:right;">{d.get('inputs',{{}}).get('projection_years','N/A')} Years</td></tr><tr><td style="padding:6px 0;">PV of FCF</td><td style="padding:6px 0;text-align:right;">{d.get('pv_fcf_sum','N/A')} M</td></tr><tr><td style="padding:6px 0;">PV of Terminal</td><td style="padding:6px 0;text-align:right;">{d.get('pv_terminal','N/A')} M</td></tr><tr><td style="padding:6px 0;">Enterprise Value</td><td style="padding:6px 0;text-align:right;">{d.get('enterprise_value','N/A')} M</td></tr><tr><td style="padding:6px 0;">Net Debt</td><td style="padding:6px 0;text-align:right;">{d.get('net_debt','N/A')} M</td></tr></table></div></details><details style="margin-top:15px;"><summary style="cursor:pointer;color:#94a3b8;font-weight:500;">📈 FCF Projections</summary><div style="margin-top:10px;background:#334155;padding:10px;border-radius:8px;"><table style="width:100%;font-size:13px;"><thead><tr style="border-bottom:1px solid #475569;"><th style="padding:8px;text-align:left;">Year</th><th style="padding:8px;text-align:right;">Projected FCF</th></tr></thead><tbody>{fcf_rows}</tbody></table></div></details><p style="margin-top:15px;font-size:12px;color:#94a3b8;text-align:center;">💡 {d.get('calculation_note','')}</p></div>"""
     html = f"""<!DOCTYPE html>
-<html>
-<head><title>Result - {name}</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"></head>
+<html><head><title>Result - {name}</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"></head>
 <body style="background:#0f172a;color:white;padding:30px;font-family:Arial;">
     <div style="max-width:900px;margin:0 auto;background:#1e293b;padding:30px;border-radius:15px;">
-        <h3 style="text-align:center;">{name} ({ticker})</h3>
-        <p style="text-align:center;color:#94a3b8;">{rtype} - {year}{quarter}</p>
+        <h3 style="text-align:center;">{name} ({ticker})</h3><p style="text-align:center;color:#94a3b8;">{rtype} - {year}{quarter}</p>
         <div style="text-align:center;margin:25px 0;"><div style="width:150px;height:150px;border-radius:50%;background:{color};display:flex;align-items:center;justify-content:center;margin:0 auto;font-size:2.5rem;font-weight:bold;">{score}</div><h4 style="color:{color};margin-top:12px;">{color_name}</h4></div>
         <table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#334155;"><th style="padding:12px;text-align:left;">Metric</th><th style="padding:12px;">Value</th><th style="padding:12px;">Score</th><th style="padding:12px;">Status</th></tr></thead><tbody>{metrics_rows}</tbody></table>
         {dcf_card}
         <a href="/" style="display:inline-block;margin-top:20px;color:#94a3b8;">← Back to Dashboard</a>
     </div>
-</body>
-</html>"""
+</body></html>"""
     return HTMLResponse(content=html)
 
 # ---------------------- API Endpoints ----------------------
@@ -537,34 +534,28 @@ async def delete_company(company_id: str):
     try: obj_id = ObjectId(company_id)
     except: raise HTTPException(400, "Invalid company ID")
     existing = await db.companies.find_one({"_id": obj_id})
-    if not existing: raise HTTPException(404, "Company not found")    await db.companies.update_one({"_id": obj_id}, {"$set": {"is_active": False, "deleted_at": datetime.utcnow()}})
+    if not existing: raise HTTPException(404, "Company not found")
+    await db.companies.update_one({"_id": obj_id}, {"$set": {"is_active": False, "deleted_at": datetime.utcnow()}})
     return {"message": "Company deleted successfully"}
-
 @app.post("/api/financial-data")
 async def create_financial_data(data: FinancialDataCreate):
-    """Input financial data and run analysis + DCF"""
     try: company_oid = ObjectId(data.company_id)
     except: raise HTTPException(400, "Invalid company ID format")
     company = await db.companies.find_one({"_id": company_oid})
     if not company: raise HTTPException(404, "Company not found")
-
     doc = data.model_dump()
     doc["company_id"] = company_oid
     doc["created_at"] = datetime.utcnow()
     result = await db.financial_data.insert_one(doc)
     financial_id = str(result.inserted_id)
-
     ratios = engine.calculate_ratios(doc)
     health_analysis = engine.calculate_health_score(ratios, company.get("sector", "General"))
-
-    # 🆕 DCF Valuation
     dcf_result = None
     if data.dcf_params and (data.free_cash_flow > 0 or data.revenue > 0):
         try:
             dcf_result = DCFValuation.run_dcf(financial_data=doc, dcf_inputs=data.dcf_params, company_info=company)
         except Exception as e:
-            print(f"⚠️ DCF Calculation Error: {e}")
-
+            print(f"⚠️ DCF Calculation Error: {{e}}")
     analysis_doc = {
         "company_id": company_oid, "financial_data_id": financial_id, "company_name": company["name"],
         "ticker": company["ticker"], "sector": company["sector"], "report_type": data.report_type,
@@ -574,7 +565,6 @@ async def create_financial_data(data: FinancialDataCreate):
         "dcf_valuation": dcf_result, "created_at": datetime.utcnow(),
     }
     await db.analysis_results.insert_one(analysis_doc)
-
     return {"financial_id": financial_id, "analysis": health_analysis, "dcf": dcf_result}
 
 @app.get("/api/analysis/{financial_data_id}")
@@ -586,7 +576,8 @@ async def get_analysis(financial_data_id: str):
 
 @app.get("/api/compare/{sector}")
 async def compare_companies(sector: str):
-    companies = await db.companies.find({"sector": sector, "is_active": True}).to_list(50)    comparison = []
+    companies = await db.companies.find({"sector": sector, "is_active": True}).to_list(50)
+    comparison = []
     for company in companies:
         analysis = await db.analysis_results.find_one({"company_id": company["_id"]}).sort("created_at", -1)
         if analysis:
@@ -595,8 +586,7 @@ async def compare_companies(sector: str):
                 "overall_score": analysis["overall_score"], "overall_color": analysis["overall_color"],
                 "dcf_signal": analysis.get("dcf_valuation", {}).get("signal"),
                 "dcf_upside": analysis.get("dcf_valuation", {}).get("upside_percent")
-            })
-    return sorted(comparison, key=lambda x: x["overall_score"], reverse=True)
+            })    return sorted(comparison, key=lambda x: x["overall_score"], reverse=True)
 
 # ---------------------- Run Config ----------------------
 if __name__ == "__main__":
