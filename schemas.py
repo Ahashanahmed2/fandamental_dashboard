@@ -31,9 +31,6 @@ class CompanyCreate(BaseModel):
             "Insurance", "NBFI", "Engineering", "Ceramic",
             "Tannery", "Paper", "Jute", "Services", "Miscellaneous"
         ]
-        if v not in valid_sectors:
-            # কাস্টম সেক্টর অনুমোদিত কিন্তু ওয়ার্নিং দেওয়া যেতে পারে
-            pass
         return v
 
 class CompanyResponse(BaseModel):
@@ -85,26 +82,9 @@ class DCFInputs(BaseModel):
         """গ্রোথ রেট ভ্যালিডেশন"""
         projection_years = info.data.get('projection_years', 5)
         if len(v) < projection_years:
-            # শেষ গ্রোথ রেট দিয়ে পূর্ণ করা
             last_rate = v[-1] if v else 0.03
             v.extend([last_rate] * (projection_years - len(v)))
-        # প্রথম projection_years সংখ্যক রেট নেওয়া
         return v[:projection_years]
-
-    @field_validator('wacc')
-    @classmethod
-    def calculate_wacc_from_capm(cls, v: float, info) -> float:
-        """CAPM থেকে WACC ক্যালকুলেট (যদি সব প্যারামিটার দেওয়া থাকে)"""
-        risk_free = info.data.get('risk_free_rate')
-        market_premium = info.data.get('market_risk_premium')
-        beta = info.data.get('beta')
-        
-        if all(x is not None for x in [risk_free, market_premium, beta]):
-            capm_wacc = risk_free + (beta * market_premium)
-            # CAPM থেকে আসা WACC ব্যবহার (যদি ম্যানুয়াল WACC ডিফল্ট থাকে)
-            if v == 0.15:  # ডিফল্ট WACC
-                return round(capm_wacc, 4)
-        return v
 
 class DCFResult(BaseModel):
     """DCF ভ্যালুয়েশন রেজাল্ট স্কিমা"""
@@ -115,7 +95,7 @@ class DCFResult(BaseModel):
     mos_adjusted_value: float
     current_price: float
     upside_percent: Optional[float] = None
-    signal: str  # BUY, HOLD, SELL
+    signal: str
     signal_color: str
     fcf_projections: List[float]
     pv_fcf_sum: float
@@ -143,10 +123,10 @@ class FinancialDataCreate(BaseModel):
         if report_type == 'quarterly' and v is None:
             raise ValueError('Quarter is required for quarterly reports')
         if report_type == 'annual' and v is not None:
-            return None  # Annual এর জন্য quarter null
+            return None
         return v
 
-    # 📋 Balance Sheet (All values in millions/lakhs as per input)
+    # 📋 Balance Sheet
     total_assets: float = Field(default=0.0, ge=0, description="মোট সম্পদ")
     total_liabilities: float = Field(default=0.0, ge=0, description="মোট দায়")
     shareholders_equity: float = Field(default=0.0, description="শেয়ারহোল্ডার ইকুইটি")
@@ -184,7 +164,7 @@ class FinancialDataCreate(BaseModel):
     car_ratio: Optional[float] = Field(None, ge=0, le=100, description="CAR রেশিও % (ব্যাংকের জন্য)")
 
     # 📊 DCF & Dividend (Optional)
-    dcf_params: Optional[DCFInputs] = Field(None, description="DCF প্যারামিটার্স (ঐচ্ছিক)")
+    dcf_params: Optional[Dict[str, Any]] = Field(None, description="DCF প্যারামিটার্স (ঐচ্ছিক)")
     dividend_growth_rate: Optional[float] = Field(None, ge=0, le=1, description="ডিভিডেন্ড গ্রোথ রেট")
 
     @field_validator('free_cash_flow')
@@ -201,10 +181,61 @@ class FinancialDataCreate(BaseModel):
     @field_validator('shares_outstanding')
     @classmethod
     def validate_shares_outstanding(cls, v: float) -> float:
-        """শেয়ার সংখ্যা কমপক্ষে ১ মিলিয়ন হতে হবে"""
-        if v < 0.001:  # খুব ছোট সংখ্যা এড়ানো
+        """শেয়ার সংখ্যা কমপক্ষে ০.০০১ মিলিয়ন হতে হবে"""
+        if v < 0.001:
             raise ValueError('Shares outstanding must be at least 0.001 million (1000 shares)')
         return v
+
+
+class FinancialDataUpdate(BaseModel):
+    """ফিন্যান্সিয়াল ডেটা আপডেট করার জন্য স্কিমা"""
+    
+    # 📅 Core Report Info
+    report_type: Optional[str] = Field(None, pattern="^(annual|quarterly)$")
+    year: Optional[int] = Field(None, ge=2000, le=2100)
+    quarter: Optional[int] = Field(None, ge=1, le=4)
+
+    # 📋 Balance Sheet
+    total_assets: Optional[float] = Field(None, ge=0)
+    total_liabilities: Optional[float] = Field(None, ge=0)
+    shareholders_equity: Optional[float] = None
+    total_debt: Optional[float] = Field(None, ge=0)
+    cash_and_equivalents: Optional[float] = Field(None, ge=0)
+    current_assets: Optional[float] = Field(None, ge=0)
+    current_liabilities: Optional[float] = Field(None, ge=0)
+
+    # 📈 Income Statement
+    revenue: Optional[float] = Field(None, ge=0)
+    gross_profit: Optional[float] = None
+    operating_income: Optional[float] = None
+    ebit: Optional[float] = None
+    ebitda: Optional[float] = None
+    interest_expense: Optional[float] = Field(None, ge=0)
+    net_income: Optional[float] = None
+
+    # 💵 Cash Flow
+    operating_cash_flow: Optional[float] = None
+    capex: Optional[float] = Field(None, ge=0)
+    free_cash_flow: Optional[float] = None
+    fcf_margin: Optional[float] = Field(None, ge=0, le=1)
+
+    # 📊 Per Share Data
+    eps: Optional[float] = None
+    dps: Optional[float] = Field(None, ge=0)
+    shares_outstanding: Optional[float] = Field(None, gt=0)
+    current_price: Optional[float] = Field(None, ge=0)
+
+    # 🏦 Bank Specific (Optional)
+    total_deposits: Optional[float] = Field(None, ge=0)
+    total_loans: Optional[float] = Field(None, ge=0)
+    net_interest_income: Optional[float] = None
+    npl_ratio: Optional[float] = Field(None, ge=0, le=100)
+    car_ratio: Optional[float] = Field(None, ge=0, le=100)
+
+    # 📊 DCF & Dividend (Optional)
+    dcf_params: Optional[Dict[str, Any]] = None
+    dividend_growth_rate: Optional[float] = Field(None, ge=0, le=1)
+
 
 class FinancialDataResponse(BaseModel):
     """ফিন্যান্সিয়াল ডেটা রেসপন্স স্কিমা"""
@@ -221,11 +252,15 @@ class FinancialDataResponse(BaseModel):
     free_cash_flow: float
     eps: float
     current_price: float
-    dcf_params: Optional[DCFInputs] = None
+    dcf_params: Optional[Dict[str, Any]] = None
     created_at: datetime
+    updated_at: Optional[datetime] = None
 
     class Config:
         populate_by_name = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat() if v else None
+        }
 
 # ==================== Analysis Result Schemas ====================
 
@@ -261,11 +296,15 @@ class AnalysisResultResponse(BaseModel):
     overall_color_name: str
     metrics: List[MetricDetail]
     ratios: Dict[str, Any]
-    dcf_valuation: Optional[DCFResult] = None
+    dcf_valuation: Optional[Dict[str, Any]] = None
     created_at: datetime
+    updated_at: Optional[datetime] = None
 
     class Config:
         populate_by_name = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat() if v else None
+        }
 
 # ==================== Comparison Schemas ====================
 
@@ -311,41 +350,34 @@ class DDMResult(BaseModel):
 
 class FinancialHealthScore(BaseModel):
     """কম্প্রিহেনসিভ ফিন্যান্সিয়াল হেলথ স্কোর"""
-    # Profitability (20% weight)
     profitability_score: float = Field(..., ge=0, le=100)
     roe: Optional[float] = None
     roa: Optional[float] = None
     net_margin: Optional[float] = None
     
-    # Efficiency (15% weight)
     efficiency_score: float = Field(..., ge=0, le=100)
     asset_turnover: Optional[float] = None
     inventory_turnover: Optional[float] = None
     
-    # Liquidity (15% weight)
     liquidity_score: float = Field(..., ge=0, le=100)
     current_ratio: Optional[float] = None
     quick_ratio: Optional[float] = None
     
-    # Solvency (20% weight)
     solvency_score: float = Field(..., ge=0, le=100)
     debt_to_equity: Optional[float] = None
     interest_coverage: Optional[float] = None
     
-    # Valuation (15% weight)
     valuation_score: float = Field(..., ge=0, le=100)
     pe_ratio: Optional[float] = None
     pb_ratio: Optional[float] = None
     peg_ratio: Optional[float] = None
     
-    # Growth (15% weight)
     growth_score: float = Field(..., ge=0, le=100)
     revenue_growth: Optional[float] = None
     profit_growth: Optional[float] = None
     
-    # Overall
     overall_score: float = Field(..., ge=0, le=100)
-    overall_grade: str  # A+, A, A-, B+, B, B-, C+, C, C-, D, F
+    overall_grade: str
 
 class HistoricalDataPoint(BaseModel):
     """হিস্টোরিকাল ফিন্যান্সিয়াল ডেটা পয়েন্ট"""
@@ -366,7 +398,7 @@ class HistoricalAnalysis(BaseModel):
     company_id: str
     ticker: str
     data_points: List[HistoricalDataPoint]
-    trend_analysis: Dict[str, Any]  # CAGR, volatility, etc.
+    trend_analysis: Dict[str, Any]
     last_updated: datetime
 
 # ==================== Export Schemas ====================
@@ -377,7 +409,7 @@ class ExportRequest(BaseModel):
     format: str = Field(default="json", pattern="^(json|csv|pdf)$")
     include_dcf: bool = True
     include_historical: bool = False
-    date_range: Optional[Dict[str, str]] = None  # {"start": "2020-01-01", "end": "2024-12-31"}
+    date_range: Optional[Dict[str, str]] = None
 
 # ==================== Utility Classes ====================
 
